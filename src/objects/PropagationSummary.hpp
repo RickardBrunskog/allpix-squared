@@ -83,6 +83,9 @@ namespace allpix {
          */
         void print(std::ostream& out) const override;
 
+        void loadHistory() override;
+        void petrifyHistory() override;
+
         /**
          * @brief ROOT class definition
          */

@@ -88,4 +88,8 @@ void PropagationSummary::print(std::ostream& out) const {
         << " bounds=(" << min_x_ << ", " << max_x_ << "), (" << min_y_ << ", " << max_y_ << "), (" << min_z_ << ", " << max_z_ << ")";
 }
 
+void PropagationSummary::loadHistory() {}
+
+void PropagationSummary::petrifyHistory() {}
+
 ClassImp(PropagationSummary)
