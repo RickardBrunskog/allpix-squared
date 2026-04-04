@@ -22,6 +22,7 @@
 #include "core/utils/log.h"
 #include "objects/exceptions.h"
 #include "tools/runge_kutta.h"
+#include "objects/PropagationSummary.hpp"
 
 using namespace allpix;
 
@@ -499,6 +500,9 @@ void InteractivePropagationModule::run(Event* event) {
     // Create vector of propagated charges to output
     std::vector<PropagatedCharge> propagated_charges;
 
+    // Create vector of propagation summaries to output
+    std::vector<PropagationSummary> propagation_summaries;
+
     // List of points to plot to plot for output plots
     LineGraph::OutputPlotPoints output_plot_points;
 
@@ -642,6 +646,13 @@ void InteractivePropagationModule::run(Event* event) {
 
     // Dispatch the message with propagated charges
     messenger_->dispatchMessage(this, std::move(propagated_charge_message), event);
+
+    // Create a new message with propagation summaries
+    auto propagation_summary_message =
+        std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
+
+    // Dispatch the message with propagation summaries
+    messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
 }
 
 // This function takes a list of propagating charges to propagate synchronously and places them in the propagated vector
