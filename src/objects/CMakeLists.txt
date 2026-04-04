@@ -22,6 +22,7 @@ ENDIF()
 ADD_LIBRARY(
     AllpixObjects SHARED
     Object.cpp
+    PropagationSummary.cpp
     Pixel.cpp
     SensorCharge.cpp
     Pulse.cpp
@@ -46,6 +47,7 @@ TARGET_INCLUDE_DIRECTORIES(AllpixObjects PUBLIC $<INSTALL_INTERFACE:include>)
 ROOT_GENERATE_DICTIONARY(
     AllpixObjectsDictionary
     ${CMAKE_CURRENT_SOURCE_DIR}/Object.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/PropagationSummary.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MCTrack.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MCParticle.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SensorCharge.hpp
