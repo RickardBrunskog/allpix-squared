@@ -589,6 +589,11 @@ TransientPropagationModule::propagate(Event* event,
     }
     auto output_plot_index = output_plot_points.size() - 1;
 
+    size_t next_summary_idx = 0;
+    if(output_propagation_summary_) {
+        next_summary_idx = static_cast<size_t>(std::ceil(initial_time_local / output_propagation_summary_step_));
+    }
+
     // Store initial charge
     const unsigned int initial_charge = charge;
 
@@ -661,6 +666,20 @@ TransientPropagationModule::propagate(Event* event,
             while(next_idx <= time_idx) {
                 output_plot_points.at(output_plot_index).second.push_back(static_cast<ROOT::Math::XYZPoint>(position));
                 next_idx = output_plot_points.at(output_plot_index).second.size();
+            }
+        }
+
+        if(output_propagation_summary_) {
+            const double current_time = initial_time_local + runge_kutta.getTime();
+
+            while((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) <= current_time &&
+                  (static_cast<double>(next_summary_idx) * output_propagation_summary_step_) < integration_time_) {
+
+                propagation_summary_bins[next_summary_idx].add(static_cast<double>(charge),
+                                                               position.x(),
+                                                               position.y(),
+                                                               position.z());
+                next_summary_idx++;
             }
         }
 
