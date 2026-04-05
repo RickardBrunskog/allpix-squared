@@ -28,6 +28,7 @@
 #include <TH1.h>
 #include <TH2.h>
 #include <TProfile.h>
+#include <algorithm>
 
 #include "core/config/Configuration.hpp"
 #include "core/geometry/Detector.hpp"
@@ -507,6 +508,49 @@ void TransientPropagationModule::run(Event* event) {
                        << ", trapped charges : " << trapped;
         }
     }
+
+    if(output_propagation_summary_) {
+        for(const auto& [idx, acc] : propagation_summary_bins) {
+            if(!acc.has_data || acc.sum_q <= 0.0) {
+                continue;
+            }
+
+            const double time = static_cast<double>(idx) * output_propagation_summary_step_;
+
+            const double mean_x = acc.sum_x / acc.sum_q;
+            const double mean_y = acc.sum_y / acc.sum_q;
+            const double mean_z = acc.sum_z / acc.sum_q;
+
+            const double mean_x2 = acc.sum_x2 / acc.sum_q;
+            const double mean_y2 = acc.sum_y2 / acc.sum_q;
+            const double mean_z2 = acc.sum_z2 / acc.sum_q;
+
+            const double var_x = std::max(0.0, mean_x2 - mean_x * mean_x);
+            const double var_y = std::max(0.0, mean_y2 - mean_y * mean_y);
+            const double var_z = std::max(0.0, mean_z2 - mean_z * mean_z);
+
+            const double rms_x = std::sqrt(var_x);
+            const double rms_y = std::sqrt(var_y);
+            const double rms_z = std::sqrt(var_z);
+            const double rms_e = std::sqrt(var_x + var_y + var_z);
+
+            propagation_summaries.emplace_back(time,
+                                               mean_x,
+                                               mean_y,
+                                               mean_z,
+                                               rms_x,
+                                               rms_y,
+                                               rms_z,
+                                               rms_e,
+                                               acc.min_x,
+                                               acc.max_x,
+                                               acc.min_y,
+                                               acc.max_y,
+                                               acc.min_z,
+                                               acc.max_z);
+        }
+    }
+
 
     // Output plots if required
     if(output_linegraphs_) {
