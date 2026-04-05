@@ -804,6 +804,7 @@ TransientPropagationModule::propagate(Event* event,
                                                                    initial_time_local + runge_kutta.getTime(),
                                                                    initial_time_global + runge_kutta.getTime(),
                                                                    level + 1,
+                                                                   propagation_summary_bins,
                                                                    propagated_charges,
                                                                    output_plot_points);
 
