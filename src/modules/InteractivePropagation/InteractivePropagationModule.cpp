@@ -732,10 +732,6 @@ InteractivePropagationModule::propagate_together(Event* event,
             throw ModuleError("InteractivePropagation internal vector size mismatch in coulomb_efield");
         }
 
-        if(propagating_charges.empty()) {
-            return std::make_tuple(0U, 0U, 0U);
-        }
-
         for (unsigned int i = 0; i < previous_charge_locations.size(); i++){
 
             // TODO: Add check with (oc)tree object that only looks at charges within a certain distance
@@ -775,19 +771,15 @@ InteractivePropagationModule::propagate_together(Event* event,
                 dist_vector = point - local_position; // A vector between the desired points (mm)
                 dist_mag2 =  dist_vector.Mag2();
 
-                if (dist_mag2 < coulomb_distance_limit_squared_){ // Limit the following calculations to if the distance of the charge is close enough to give a significant field
-
+                if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                     dist_mag = ROOT::Math::sqrt(dist_mag2);
 
-                    interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2); // Magnitude of the force [MV/mm] (always positive)
-                    // Only fill diagnostic histogram when plotting is enabled and the value is finite
+                    interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
                     if(output_plots_ && std::isfinite(interaction_magnitude) && interaction_magnitude >= 0.0) {
-                        coulomb_mag_histo_->Fill(interaction_magnitude * 1e5); // MV/mm -> V/cm
+                        coulomb_mag_histo_->Fill(interaction_magnitude * 1e5);
                     }
-                    
-                    // Add this charge's field to the total field at the point
-                    field = field + dist_vector/dist_mag * sign * interaction_magnitude; 
 
+                    field = field + dist_vector / dist_mag * sign * interaction_magnitude;
                 }
             }
 
@@ -806,18 +798,19 @@ InteractivePropagationModule::propagate_together(Event* event,
             dist_vector = point - mirror_position_neg;
             dist_mag2 = dist_vector.Mag2();
 
-            if (dist_mag2 < coulomb_distance_limit_squared_){
+            if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                 dist_mag = ROOT::Math::sqrt(dist_mag2);
-                field = field - dist_vector/dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2); // Mirror charges have opposite charge
+                field = field - dist_vector / dist_mag * sign *
+                        std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
             }
 
             // Apply field for positive-side mirror charge
             dist_vector = point - mirror_position_pos;
             dist_mag2 = dist_vector.Mag2();
 
-            if (dist_mag2 < coulomb_distance_limit_squared_){
+            if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                 dist_mag = ROOT::Math::sqrt(dist_mag2);
-                field = field - dist_vector/dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
+                field = field - dist_vector / dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
             }
         }
 
@@ -934,6 +927,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                                             std::vector<ROOT::Math::XYZPoint>());
         }
 
+    }
+
+    if(propagating_charges.empty()) {
+        return std::make_tuple(0U, 0U, 0U);
     }
 
     // Set up variables that are changed each loop
