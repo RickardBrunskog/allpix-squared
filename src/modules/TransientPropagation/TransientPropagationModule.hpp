@@ -36,6 +36,7 @@
 #include "tools/line_graphs.h"
 
 #include "objects/PropagationSummary.hpp"
+#include <map>
 
 namespace allpix {
     /**
@@ -94,6 +95,62 @@ namespace allpix {
          *
          * @return Total recombined, trapped and propagated charge for statistics purposes
          */
+        
+        struct PropagationSummaryAccumulator {
+            double sum_q{};
+            double sum_x{};
+            double sum_y{};
+            double sum_z{};
+            double sum_x2{};
+            double sum_y2{};
+            double sum_z2{};
+
+            bool has_data{false};
+
+            double min_x{};
+            double max_x{};
+            double min_y{};
+            double max_y{};
+            double min_z{};
+            double max_z{};
+
+            void add(double q, double x, double y, double z) {
+                sum_q += q;
+                sum_x += q * x;
+                sum_y += q * y;
+                sum_z += q * z;
+
+                sum_x2 += q * x * x;
+                sum_y2 += q * y * y;
+                sum_z2 += q * z * z;
+
+                if(!has_data) {
+                    min_x = max_x = x;
+                    min_y = max_y = y;
+                    min_z = max_z = z;
+                    has_data = true;
+                } else {
+                    if(x < min_x) {
+                        min_x = x;
+                    }
+                    if(x > max_x) {
+                        max_x = x;
+                    }
+                    if(y < min_y) {
+                        min_y = y;
+                    }
+                    if(y > max_y) {
+                        max_y = y;
+                    }
+                    if(z < min_z) {
+                        min_z = z;
+                    }
+                    if(z > max_z) {
+                        max_z = z;
+                    }
+                }
+            }
+        };
         std::tuple<unsigned int, unsigned int, unsigned int>
         propagate(Event* event,
                   const DepositedCharge& deposit,
@@ -103,6 +160,7 @@ namespace allpix {
                   const double initial_time_local,
                   const double initial_time_global,
                   const unsigned int level,
+                  std::map<size_t, PropagationSummaryAccumulator>& propagation_summary_bins,
                   std::vector<PropagatedCharge>& propagated_charges,
                   LineGraph::OutputPlotPoints& output_plot_points) const;
 

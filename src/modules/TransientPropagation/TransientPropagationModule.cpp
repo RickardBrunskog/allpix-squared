@@ -443,6 +443,7 @@ void TransientPropagationModule::run(Event* event) {
     // Create vector of propagated charges to output
     std::vector<PropagatedCharge> propagated_charges;
     std::vector<PropagationSummary> propagation_summaries;
+    std::map<size_t, PropagationSummaryAccumulator> propagation_summary_bins;
     unsigned int propagated_charges_count = 0;
     unsigned int recombined_charges_count = 0;
     unsigned int trapped_charges_count = 0;
@@ -487,15 +488,16 @@ void TransientPropagationModule::run(Event* event) {
 
             // Get position and propagate through sensor
             auto [recombined, trapped, propagated] = propagate(event,
-                                                               deposit,
-                                                               deposit.getLocalPosition(),
-                                                               deposit.getType(),
-                                                               charge_per_step,
-                                                               deposit.getLocalTime(),
-                                                               deposit.getGlobalTime(),
-                                                               0,
-                                                               propagated_charges,
-                                                               output_plot_points);
+                                                                deposit,
+                                                                deposit.getLocalPosition(),
+                                                                deposit.getType(),
+                                                                charge_per_step,
+                                                                deposit.getLocalTime(),
+                                                                deposit.getGlobalTime(),
+                                                                0,
+                                                                propagation_summary_bins,
+                                                                propagated_charges,
+                                                                output_plot_points);
 
             // Update statistics:
             recombined_charges_count += recombined;
@@ -563,6 +565,7 @@ TransientPropagationModule::propagate(Event* event,
                                       const double initial_time_local,
                                       const double initial_time_global,
                                       const unsigned int level,
+                                      std::map<size_t, PropagationSummaryAccumulator>& propagation_summary_bins,
                                       std::vector<PropagatedCharge>& propagated_charges,
                                       LineGraph::OutputPlotPoints& output_plot_points) const {
 
