@@ -76,11 +76,12 @@ namespace allpix {
          * 
          * @return Total recombined, trapped and propagated charge for statistics purposes
          */
-        std::tuple<unsigned int, unsigned int, unsigned int> 
+        std::tuple<unsigned int, unsigned int, unsigned int>
         propagate_together(Event* event,
-                           std::vector<PropagatedCharge>& propagating_charges,
-                           std::vector<PropagatedCharge>& propagated_charges,
-                           LineGraph::OutputPlotPoints& output_plot_points) const;
+                   std::vector<PropagatedCharge>& propagating_charges,
+                   std::vector<PropagatedCharge>& propagated_charges,
+                   std::vector<PropagationSummary>& propagation_summaries,
+                   LineGraph::OutputPlotPoints& output_plot_points) const;
 
         // Local copies of configuration parameters to avoid costly lookup:
         double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{}, output_propagation_summary_step_{};

@@ -620,7 +620,7 @@ void InteractivePropagationModule::run(Event* event) {
     LOG(INFO) << "Average number of charges per group is " << total_deposited_charge/propagating_charges.size() << " ("<< propagating_charges.size() <<" total)";
     
     // Propagation occurs within the following function call
-    auto [recombined_charges_count, trapped_charges_count, propagated_charges_count] = propagate_together(event, propagating_charges, propagated_charges, output_plot_points);
+    auto [recombined_charges_count, trapped_charges_count, propagated_charges_count] = propagate_together(event, propagating_charges, propagated_charges, propagation_summaries, output_plot_points);
 
     // Output plots if required
     if(output_linegraphs_) {
@@ -670,6 +670,7 @@ std::tuple<unsigned int, unsigned int, unsigned int>
 InteractivePropagationModule::propagate_together(Event* event,
                                                  std::vector<PropagatedCharge>& propagating_charges,
                                                  std::vector<PropagatedCharge>& propagated_charges,
+                                                 std::vector<PropagationSummary>& propagation_summaries,
                                                  LineGraph::OutputPlotPoints& output_plot_points) const {
 
     unsigned int propagated_charges_count = 0;
@@ -1033,6 +1034,123 @@ InteractivePropagationModule::propagate_together(Event* event,
                 rms_e_subgraph_->AddPoint(time, rms_total_e);
                 rms_h_subgraph_->AddPoint(time, rms_total_h);
 
+            }
+        }
+
+                if(output_propagation_summary_ && std::fmod(time, output_propagation_summary_step_) < timestep_) {
+
+            double sum_q = 0.0;
+            double sum_x = 0.0;
+            double sum_y = 0.0;
+            double sum_z = 0.0;
+
+            bool have_selected_charge = false;
+
+            double min_x = 0.0;
+            double max_x = 0.0;
+            double min_y = 0.0;
+            double max_y = 0.0;
+            double min_z = 0.0;
+            double max_z = 0.0;
+
+            for(unsigned int i = 0; i < charge_locations.size(); i++) {
+
+                // Skip charge groups that have not yet been deposited
+                if(propagating_charges[i].getLocalTime() > time) {
+                    continue;
+                }
+
+                // Exclude recombined charge groups
+                if(charge_states[i] == CarrierState::RECOMBINED) {
+                    continue;
+                }
+
+                const double q = static_cast<double>(propagating_charges[i].getCharge());
+                const auto& location = charge_locations[i];
+
+                sum_q += q;
+                sum_x += q * location.x();
+                sum_y += q * location.y();
+                sum_z += q * location.z();
+
+                if(!have_selected_charge) {
+                    min_x = max_x = location.x();
+                    min_y = max_y = location.y();
+                    min_z = max_z = location.z();
+                    have_selected_charge = true;
+                } else {
+                    if(location.x() < min_x) {
+                        min_x = location.x();
+                    }
+                    if(location.x() > max_x) {
+                        max_x = location.x();
+                    }
+                    if(location.y() < min_y) {
+                        min_y = location.y();
+                    }
+                    if(location.y() > max_y) {
+                        max_y = location.y();
+                    }
+                    if(location.z() < min_z) {
+                        min_z = location.z();
+                    }
+                    if(location.z() > max_z) {
+                        max_z = location.z();
+                    }
+                }
+            }
+
+            if(have_selected_charge && sum_q > 0.0) {
+
+                const double mean_x = sum_x / sum_q;
+                const double mean_y = sum_y / sum_q;
+                const double mean_z = sum_z / sum_q;
+
+                double var_x = 0.0;
+                double var_y = 0.0;
+                double var_z = 0.0;
+
+                for(unsigned int i = 0; i < charge_locations.size(); i++) {
+
+                    if(propagating_charges[i].getLocalTime() > time) {
+                        continue;
+                    }
+
+                    if(charge_states[i] == CarrierState::RECOMBINED) {
+                        continue;
+                    }
+
+                    const double q = static_cast<double>(propagating_charges[i].getCharge());
+                    const auto& location = charge_locations[i];
+
+                    const double dx = location.x() - mean_x;
+                    const double dy = location.y() - mean_y;
+                    const double dz = location.z() - mean_z;
+
+                    var_x += q * dx * dx;
+                    var_y += q * dy * dy;
+                    var_z += q * dz * dz;
+                }
+
+                const double rms_x = std::sqrt(var_x / sum_q);
+                const double rms_y = std::sqrt(var_y / sum_q);
+                const double rms_z = std::sqrt(var_z / sum_q);
+                const double rms_e = std::sqrt((var_x + var_y + var_z) / sum_q);
+
+                propagation_summaries.emplace_back(time,
+                                                   mean_x,
+                                                   mean_y,
+                                                   mean_z,
+                                                   rms_x,
+                                                   rms_y,
+                                                   rms_z,
+                                                   rms_e,
+                                                   min_x,
+                                                   max_x,
+                                                   min_y,
+                                                   max_y,
+                                                   min_z,
+                                                   max_z);
             }
         }
 
