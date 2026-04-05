@@ -90,6 +90,7 @@ TransientPropagationModule::TransientPropagationModule(Configuration& config,
 
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
+    config_.setDefault<double>("output_propagation_summary_step", config_.get<double>("timestep"));
 
     config_.setDefault<bool>("output_linegraphs", false);
     config_.setDefault<bool>("output_linegraphs_collected", false);
@@ -127,6 +128,8 @@ TransientPropagationModule::TransientPropagationModule(Configuration& config,
     output_linegraphs_recombined_ = config_.get<bool>("output_linegraphs_recombined");
     output_linegraphs_trapped_ = config_.get<bool>("output_linegraphs_trapped");
     output_plots_step_ = config_.get<double>("output_plots_step");
+    // Rickard 2026-04-05: Added step size for outputting propagation summary objects
+    output_propagation_summary_step_ = config_.get<double>("output_propagation_summary_step");
     output_max_gain_histo_ = config.get<unsigned int>("output_max_gain_histo");
 
     // Avoids wrong gain histogram inputs

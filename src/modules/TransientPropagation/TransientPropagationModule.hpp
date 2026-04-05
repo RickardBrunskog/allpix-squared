@@ -107,7 +107,7 @@ namespace allpix {
                   LineGraph::OutputPlotPoints& output_plot_points) const;
 
         // Local copies of configuration parameters to avoid costly lookup:
-        double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{};
+        double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{}, output_propagation_summary_step_{};
         bool output_plots_{}, output_linegraphs_{}, output_linegraphs_collected_{}, output_linegraphs_recombined_{},
             output_linegraphs_trapped_{};
         unsigned int distance_{};

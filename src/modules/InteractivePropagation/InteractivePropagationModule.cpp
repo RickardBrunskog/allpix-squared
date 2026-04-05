@@ -48,6 +48,7 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); // Will need to convert to V/cm to use properly (previously 5760)
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
+    config_.setDefault<double>("output_propagation_summary_step", config_.get<double>("timestep"));
 
     // Models:
     config_.setDefault<std::string>("mobility_model", "jacoboni");
@@ -132,6 +133,8 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     output_linegraphs_trapped_ = config_.get<bool>("output_linegraphs_trapped");
     output_rms_ = config_.get<bool>("output_rms");
     output_plots_step_ = config_.get<double>("output_plots_step");
+    // Rickard 2026-04-05: Get step size for outputting propagation summary objects
+    output_propagation_summary_step_ = config_.get<double>("output_propagation_summary_step");
 
     // Enable multithreading of this module if multithreading is enabled and no per-event output plots are requested:
     // FIXME: Review if this is really the case or we can still use multithreading
