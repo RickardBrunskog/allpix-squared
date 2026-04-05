@@ -35,6 +35,8 @@
 #include "tools/ROOT.h"
 #include "tools/line_graphs.h"
 
+#include "objects/PropagationSummary.hpp"
+
 namespace allpix {
     /**
      * @ingroup Modules
@@ -131,6 +133,9 @@ namespace allpix {
 
         // Reflectivity of sensor surface (outside implants)
         double surface_reflectivity_{0};
+
+        // Rickard 2026-04-05: Added bool for whether to output propagation summary object
+        bool output_propagation_summary_{false};
 
         // Magnetic field
         bool has_magnetic_field_{};

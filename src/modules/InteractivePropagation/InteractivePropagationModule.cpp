@@ -657,7 +657,6 @@ void InteractivePropagationModule::run(Event* event) {
         // Create a new message with propagation summaries
         auto propagation_summary_message =
             std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
-
         // Dispatch the message with propagation summaries
         messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
     }

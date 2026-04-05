@@ -88,6 +88,9 @@ TransientPropagationModule::TransientPropagationModule(Configuration& config,
     config_.setDefault<unsigned int>("max_multiplication_level", 5);
     config_.setDefault<std::string>("multiplication_model", "none");
 
+    // Rickard 2026-04-05: Added bool for outputting propagation summary objects
+    config_.setDefault<bool>("output_propagation_summary", false);
+
     config_.setDefault<bool>("output_linegraphs", false);
     config_.setDefault<bool>("output_linegraphs_collected", false);
     config_.setDefault<bool>("output_linegraphs_recombined", false);
@@ -114,6 +117,9 @@ TransientPropagationModule::TransientPropagationModule(Configuration& config,
     surface_reflectivity_ = config_.get<double>("surface_reflectivity");
 
     max_multiplication_level_ = config.get<unsigned int>("max_multiplication_level");
+
+    // Rickard 2026-04-05: Get bool for outputting propagation summary objects
+    output_propagation_summary_ = config_.get<bool>("output_propagation_summary");
 
     output_plots_ = config_.get<bool>("output_plots");
     output_linegraphs_ = config_.get<bool>("output_linegraphs");
@@ -433,6 +439,7 @@ void TransientPropagationModule::run(Event* event) {
 
     // Create vector of propagated charges to output
     std::vector<PropagatedCharge> propagated_charges;
+    std::vector<PropagationSummary> propagation_summaries;
     unsigned int propagated_charges_count = 0;
     unsigned int recombined_charges_count = 0;
     unsigned int trapped_charges_count = 0;
@@ -528,6 +535,15 @@ void TransientPropagationModule::run(Event* event) {
 
     // Dispatch the message with propagated charges
     messenger_->dispatchMessage(this, std::move(propagated_charge_message), event);
+
+    // Rickard 2026-04-05: Output propagation summary objects if requested
+    if(output_propagation_summary_) {
+        // Create a new message with propagation summaries
+        auto propagation_summary_message =
+            std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
+        // Dispatch the message with propagation summaries
+        messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
+    }
 }
 
 /**
