@@ -727,6 +727,15 @@ InteractivePropagationModule::propagate_together(Event* event,
             return Eigen::Vector3d(field.x(),field.y(),field.z());
         }
 
+        if(previous_charge_locations.size() != propagating_charges.size() ||
+            charge_states.size() != propagating_charges.size()) {
+            throw ModuleError("InteractivePropagation internal vector size mismatch in coulomb_efield");
+        }
+
+        if(propagating_charges.empty()) {
+            return std::make_tuple(0U, 0U, 0U);
+        }
+
         for (unsigned int i = 0; i < previous_charge_locations.size(); i++){
 
             // TODO: Add check with (oc)tree object that only looks at charges within a certain distance
@@ -771,7 +780,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                     dist_mag = ROOT::Math::sqrt(dist_mag2);
 
                     interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2); // Magnitude of the force [MV/mm] (always positive)
-                    coulomb_mag_histo_ -> Fill(interaction_magnitude * 1e5); // Conversion from MV/mm to V/cm
+                    // Only fill diagnostic histogram when plotting is enabled and the value is finite
+                    if(output_plots_ && std::isfinite(interaction_magnitude) && interaction_magnitude >= 0.0) {
+                        coulomb_mag_histo_->Fill(interaction_magnitude * 1e5); // MV/mm -> V/cm
+                    }
                     
                     // Add this charge's field to the total field at the point
                     field = field + dist_vector/dist_mag * sign * interaction_magnitude; 
@@ -926,7 +938,7 @@ InteractivePropagationModule::propagate_together(Event* event,
 
     // Set up variables that are changed each loop
     Eigen::Vector3d efield{};
-    allpix::PropagatedCharge &charge = propagating_charges[0];
+    allpix::PropagatedCharge charge = propagating_charges[0];
     ROOT::Math::XYZPoint position{}; // = ROOT::Math::XYZPoint();
     ROOT::Math::XYZPoint previous_position{}; // = ROOT::Math::XYZPoint();
     allpix::CarrierType type = charge.getType();
