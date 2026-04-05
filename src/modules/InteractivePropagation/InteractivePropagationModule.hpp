@@ -134,6 +134,9 @@ namespace allpix {
         // Reflectivity of sensor surface (outside implants)
         double surface_reflectivity_{0};
 
+        // Rickard 2026-04-05: Bool for whether to output propagation summary objects
+        bool output_propagation_summary_{false};
+
         // Magnetic field
         bool has_magnetic_field_{};
 

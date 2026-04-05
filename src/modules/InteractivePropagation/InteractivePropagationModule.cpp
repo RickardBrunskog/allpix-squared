@@ -46,6 +46,8 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
     config_.setDefault<double>("coulomb_distance_limit", Units::get(4e-5,"cm"));
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); // Will need to convert to V/cm to use properly (previously 5760)
+    // Rickard 2026-04-05: Added bool for outputting propagation summary objects
+    config_.setDefault<bool>("output_propagation_summary", false);
 
     // Models:
     config_.setDefault<std::string>("mobility_model", "jacoboni");
@@ -88,6 +90,9 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<bool>("output_plots_align_pixels", false);
     config_.setDefault<double>("output_plots_theta", 0.0f);
     config_.setDefault<double>("output_plots_phi", 0.0f);
+
+    // Rickard 2026-04-05: Get bool for outputting propagation summary objects
+    output_propagation_summary_ = config_.get<bool>("output_propagation_summary");
 
     // Copy some variables from configuration to avoid lookups:
     temperature_ = config_.get<double>("temperature");
@@ -647,12 +652,15 @@ void InteractivePropagationModule::run(Event* event) {
     // Dispatch the message with propagated charges
     messenger_->dispatchMessage(this, std::move(propagated_charge_message), event);
 
-    // Create a new message with propagation summaries
-    auto propagation_summary_message =
-        std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
+    // Rickard 2026-04-05: Add message dispatching of propagation summaries for use in other modules or for output, if enabled in the configuration file will contain the summary for each sampling step
+    if(output_propagation_summary_) {
+        // Create a new message with propagation summaries
+        auto propagation_summary_message =
+            std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
 
-    // Dispatch the message with propagation summaries
-    messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
+        // Dispatch the message with propagation summaries
+        messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
+    }
 }
 
 // This function takes a list of propagating charges to propagate synchronously and places them in the propagated vector
