@@ -934,6 +934,22 @@ TransientPropagationModule::propagate(Event* event,
         last_efield = efield;
     }
 
+    if(output_propagation_summary_ && state != CarrierState::RECOMBINED) {
+        const double final_time = initial_time_local + runge_kutta.getTime();
+
+        while((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) < integration_time_) {
+
+            // Only contribute to bins at or after the final state time
+            if((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) >= final_time) {
+                propagation_summary_bins[next_summary_idx].add(static_cast<double>(charge),
+                                                               position.x(),
+                                                               position.y(),
+                                                               position.z());
+            }
+            next_summary_idx++;
+        }
+    }
+
     if(output_plots_ && !multiplication_.is<NoImpactIonization>()) {
         auto gain = charge / initial_charge;
         if(level == 0) {
