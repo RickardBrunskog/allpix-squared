@@ -15,7 +15,7 @@
 #include <memory>
 #include <string>
 #include <utility>
-
+#include <limits>
 #include <Eigen/Core>
 
 #include "core/utils/distributions.h"
@@ -23,6 +23,7 @@
 #include "objects/exceptions.h"
 #include "tools/runge_kutta.h"
 #include "objects/PropagationSummary.hpp"
+
 
 using namespace allpix;
 
@@ -1047,6 +1048,8 @@ InteractivePropagationModule::propagate_together(Event* event,
         }
 
         if(output_propagation_summary_ && std::fmod(time, output_propagation_summary_step_) < timestep_) {
+            
+            const double nan = std::numeric_limits<double>::quiet_NaN();
 
             double sum_q_e = 0.0;
             double sum_x_e = 0.0;
@@ -1061,13 +1064,13 @@ InteractivePropagationModule::propagate_together(Event* event,
             bool have_electrons = false;
             bool have_holes = false;
 
-            double min_x_e = 0.0, max_x_e = 0.0;
-            double min_y_e = 0.0, max_y_e = 0.0;
-            double min_z_e = 0.0, max_z_e = 0.0;
+            double min_x_e = nan, max_x_e = nan;
+            double min_y_e = nan, max_y_e = nan;
+            double min_z_e = nan, max_z_e = nan;
 
-            double min_x_h = 0.0, max_x_h = 0.0;
-            double min_y_h = 0.0, max_y_h = 0.0;
-            double min_z_h = 0.0, max_z_h = 0.0;
+            double min_x_h = nan, max_x_h = nan;
+            double min_y_h = nan, max_y_h = nan;
+            double min_z_h = nan, max_z_h = nan;
 
             for(unsigned int i = 0; i < charge_locations.size(); i++) {
 
@@ -1123,8 +1126,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                 }
             }
 
-            double mean_x_e = 0.0, mean_y_e = 0.0, mean_z_e = 0.0;
-            double mean_x_h = 0.0, mean_y_h = 0.0, mean_z_h = 0.0;
+            double mean_x_e = nan, mean_y_e = nan, mean_z_e = nan;
+            double mean_x_h = nan, mean_y_h = nan, mean_z_h = nan;
 
             if(have_electrons && sum_q_e > 0.0) {
                 mean_x_e = sum_x_e / sum_q_e;
@@ -1173,15 +1176,15 @@ InteractivePropagationModule::propagate_together(Event* event,
                 }
             }
 
-            const double rms_x_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_x_e / sum_q_e) : 0.0;
-            const double rms_y_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_y_e / sum_q_e) : 0.0;
-            const double rms_z_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_z_e / sum_q_e) : 0.0;
-            const double rms_e_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt((var_x_e + var_y_e + var_z_e) / sum_q_e) : 0.0;
+            const double rms_x_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_x_e / sum_q_e) : nan;
+            const double rms_y_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_y_e / sum_q_e) : nan;
+            const double rms_z_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_z_e / sum_q_e) : nan;
+            const double rms_e_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt((var_x_e + var_y_e + var_z_e) / sum_q_e) : nan;
 
-            const double rms_x_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_x_h / sum_q_h) : 0.0;
-            const double rms_y_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_y_h / sum_q_h) : 0.0;
-            const double rms_z_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_z_h / sum_q_h) : 0.0;
-            const double rms_e_h = (have_holes && sum_q_h > 0.0) ? std::sqrt((var_x_h + var_y_h + var_z_h) / sum_q_h) : 0.0;
+            const double rms_x_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_x_h / sum_q_h) : nan;
+            const double rms_y_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_y_h / sum_q_h) : nan;
+            const double rms_z_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_z_h / sum_q_h) : nan;
+            const double rms_e_h = (have_holes && sum_q_h > 0.0) ? std::sqrt((var_x_h + var_y_h + var_z_h) / sum_q_h) : nan;
 
             propagation_summaries.emplace_back(time,
                                             have_electrons,
