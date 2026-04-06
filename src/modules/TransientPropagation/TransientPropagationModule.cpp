@@ -535,19 +535,34 @@ void TransientPropagationModule::run(Event* event) {
             const double rms_e = std::sqrt(var_x + var_y + var_z);
 
             propagation_summaries.emplace_back(time,
-                                               mean_x,
-                                               mean_y,
-                                               mean_z,
-                                               rms_x,
-                                               rms_y,
-                                               rms_z,
-                                               rms_e,
-                                               acc.min_x,
-                                               acc.max_x,
-                                               acc.min_y,
-                                               acc.max_y,
-                                               acc.min_z,
-                                               acc.max_z);
+                                   true,   // has_electrons (temporary combined mapping)
+                                   false,  // has_holes
+                                   mean_x,
+                                   mean_y,
+                                   mean_z,
+                                   rms_x,
+                                   rms_y,
+                                   rms_z,
+                                   rms_e,
+                                   acc.min_x,
+                                   acc.max_x,
+                                   acc.min_y,
+                                   acc.max_y,
+                                   acc.min_z,
+                                   acc.max_z,
+                                   0.0,  // mean_x_h
+                                   0.0,  // mean_y_h
+                                   0.0,  // mean_z_h
+                                   0.0,  // rms_x_h
+                                   0.0,  // rms_y_h
+                                   0.0,  // rms_z_h
+                                   0.0,  // rms_e_h
+                                   0.0,  // min_x_h
+                                   0.0,  // max_x_h
+                                   0.0,  // min_y_h
+                                   0.0,  // max_y_h
+                                   0.0,  // min_z_h
+                                   0.0); // max_z_h
         }
     }
 

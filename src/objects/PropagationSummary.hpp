@@ -45,37 +45,71 @@ namespace allpix {
          * @param max_z Maximum z position of the propagated charge cloud
          */
         PropagationSummary(double local_time,
-                           double mean_x,
-                           double mean_y,
-                           double mean_z,
-                           double rms_x,
-                           double rms_y,
-                           double rms_z,
-                           double rms_e,
-                           double min_x,
-                           double max_x,
-                           double min_y,
-                           double max_y,
-                           double min_z,
-                           double max_z);
+                            bool has_electrons,
+                            bool has_holes,
+                            double mean_x_e,
+                            double mean_y_e,
+                            double mean_z_e,
+                            double rms_x_e,
+                            double rms_y_e,
+                            double rms_z_e,
+                            double rms_e_e,
+                            double min_x_e,
+                            double max_x_e,
+                            double min_y_e,
+                            double max_y_e,
+                            double min_z_e,
+                            double max_z_e,
+                            double mean_x_h,
+                            double mean_y_h,
+                            double mean_z_h,
+                            double rms_x_h,
+                            double rms_y_h,
+                            double rms_z_h,
+                            double rms_e_h,
+                            double min_x_h,
+                            double max_x_h,
+                            double min_y_h,
+                            double max_y_h,
+                            double min_z_h,
+                            double max_z_h);
 
         double getLocalTime() const;
 
-        double getMeanX() const;
-        double getMeanY() const;
-        double getMeanZ() const;
+        bool hasElectrons() const;
+        bool hasHoles() const;
 
-        double getRMSX() const;
-        double getRMSY() const;
-        double getRMSZ() const;
-        double getRMSE() const;
+        double getMeanXE() const;
+        double getMeanYE() const;
+        double getMeanZE() const;
 
-        double getMinX() const;
-        double getMaxX() const;
-        double getMinY() const;
-        double getMaxY() const;
-        double getMinZ() const;
-        double getMaxZ() const;
+        double getRMSXE() const;
+        double getRMSYE() const;
+        double getRMSZE() const;
+        double getRMSEE() const;
+
+        double getMinXE() const;
+        double getMaxXE() const;
+        double getMinYE() const;
+        double getMaxYE() const;
+        double getMinZE() const;
+        double getMaxZE() const;
+
+        double getMeanXH() const;
+        double getMeanYH() const;
+        double getMeanZH() const;
+
+        double getRMSXH() const;
+        double getRMSYH() const;
+        double getRMSZH() const;
+        double getRMSEH() const;
+
+        double getMinXH() const;
+        double getMaxXH() const;
+        double getMinYH() const;
+        double getMaxYH() const;
+        double getMinZH() const;
+        double getMaxZH() const;
 
         /**
          * @brief Print an ASCII representation of PropagationSummary to the given stream
@@ -89,24 +123,45 @@ namespace allpix {
         /**
          * @brief ROOT class definition
          */
-        ClassDefOverride(PropagationSummary, 1); // NOLINT
+        ClassDefOverride(PropagationSummary, 2); // NOLINT
 
     private:
         double local_time_{};
-        double mean_x_{};
-        double mean_y_{};
-        double mean_z_{};
 
-        double rms_x_{};
-        double rms_y_{};
-        double rms_z_{};
-        double rms_e_{};
-        double min_x_{};
-        double max_x_{};
-        double min_y_{};
-        double max_y_{};
-        double min_z_{};
-        double max_z_{};
+        bool has_electrons_{false};
+        bool has_holes_{false};
+
+        double mean_x_e_{};
+        double mean_y_e_{};
+        double mean_z_e_{};
+
+        double rms_x_e_{};
+        double rms_y_e_{};
+        double rms_z_e_{};
+        double rms_e_e_{};
+
+        double min_x_e_{};
+        double max_x_e_{};
+        double min_y_e_{};
+        double max_y_e_{};
+        double min_z_e_{};
+        double max_z_e_{};
+
+        double mean_x_h_{};
+        double mean_y_h_{};
+        double mean_z_h_{};
+
+        double rms_x_h_{};
+        double rms_y_h_{};
+        double rms_z_h_{};
+        double rms_e_h_{};
+
+        double min_x_h_{};
+        double max_x_h_{};
+        double min_y_h_{};
+        double max_y_h_{};
+        double min_z_h_{};
+        double max_z_h_{};
     };
 
     /**
