@@ -1078,9 +1078,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                     continue;
                 }
 
-                if(charge_states[i] == CarrierState::RECOMBINED) {
+                if(charge_states[i] == CarrierState::RECOMBINED ||
+                   charge_states[i] == CarrierState::TRAPPED) {
                     continue;
                 }
+
+
 
                 const double q = static_cast<double>(propagating_charges[i].getCharge());
                 const auto& location = charge_locations[i];
