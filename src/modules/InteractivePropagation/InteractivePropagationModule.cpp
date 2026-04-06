@@ -1046,30 +1046,35 @@ InteractivePropagationModule::propagate_together(Event* event,
             }
         }
 
-                if(output_propagation_summary_ && std::fmod(time, output_propagation_summary_step_) < timestep_) {
+        if(output_propagation_summary_ && std::fmod(time, output_propagation_summary_step_) < timestep_) {
 
-            double sum_q = 0.0;
-            double sum_x = 0.0;
-            double sum_y = 0.0;
-            double sum_z = 0.0;
+            double sum_q_e = 0.0;
+            double sum_x_e = 0.0;
+            double sum_y_e = 0.0;
+            double sum_z_e = 0.0;
 
-            bool have_selected_charge = false;
+            double sum_q_h = 0.0;
+            double sum_x_h = 0.0;
+            double sum_y_h = 0.0;
+            double sum_z_h = 0.0;
 
-            double min_x = 0.0;
-            double max_x = 0.0;
-            double min_y = 0.0;
-            double max_y = 0.0;
-            double min_z = 0.0;
-            double max_z = 0.0;
+            bool have_electrons = false;
+            bool have_holes = false;
+
+            double min_x_e = 0.0, max_x_e = 0.0;
+            double min_y_e = 0.0, max_y_e = 0.0;
+            double min_z_e = 0.0, max_z_e = 0.0;
+
+            double min_x_h = 0.0, max_x_h = 0.0;
+            double min_y_h = 0.0, max_y_h = 0.0;
+            double min_z_h = 0.0, max_z_h = 0.0;
 
             for(unsigned int i = 0; i < charge_locations.size(); i++) {
 
-                // Skip charge groups that have not yet been deposited
                 if(propagating_charges[i].getLocalTime() > time) {
                     continue;
                 }
 
-                // Exclude recombined charge groups
                 if(charge_states[i] == CarrierState::RECOMBINED) {
                     continue;
                 }
@@ -1077,105 +1082,136 @@ InteractivePropagationModule::propagate_together(Event* event,
                 const double q = static_cast<double>(propagating_charges[i].getCharge());
                 const auto& location = charge_locations[i];
 
-                sum_q += q;
-                sum_x += q * location.x();
-                sum_y += q * location.y();
-                sum_z += q * location.z();
+                if(propagating_charges[i].getType() == CarrierType::ELECTRON) {
+                    sum_q_e += q;
+                    sum_x_e += q * location.x();
+                    sum_y_e += q * location.y();
+                    sum_z_e += q * location.z();
 
-                if(!have_selected_charge) {
-                    min_x = max_x = location.x();
-                    min_y = max_y = location.y();
-                    min_z = max_z = location.z();
-                    have_selected_charge = true;
-                } else {
-                    if(location.x() < min_x) {
-                        min_x = location.x();
+                    if(!have_electrons) {
+                        min_x_e = max_x_e = location.x();
+                        min_y_e = max_y_e = location.y();
+                        min_z_e = max_z_e = location.z();
+                        have_electrons = true;
+                    } else {
+                        min_x_e = std::min(min_x_e, location.x());
+                        max_x_e = std::max(max_x_e, location.x());
+                        min_y_e = std::min(min_y_e, location.y());
+                        max_y_e = std::max(max_y_e, location.y());
+                        min_z_e = std::min(min_z_e, location.z());
+                        max_z_e = std::max(max_z_e, location.z());
                     }
-                    if(location.x() > max_x) {
-                        max_x = location.x();
-                    }
-                    if(location.y() < min_y) {
-                        min_y = location.y();
-                    }
-                    if(location.y() > max_y) {
-                        max_y = location.y();
-                    }
-                    if(location.z() < min_z) {
-                        min_z = location.z();
-                    }
-                    if(location.z() > max_z) {
-                        max_z = location.z();
+                } else if(propagating_charges[i].getType() == CarrierType::HOLE) {
+                    sum_q_h += q;
+                    sum_x_h += q * location.x();
+                    sum_y_h += q * location.y();
+                    sum_z_h += q * location.z();
+
+                    if(!have_holes) {
+                        min_x_h = max_x_h = location.x();
+                        min_y_h = max_y_h = location.y();
+                        min_z_h = max_z_h = location.z();
+                        have_holes = true;
+                    } else {
+                        min_x_h = std::min(min_x_h, location.x());
+                        max_x_h = std::max(max_x_h, location.x());
+                        min_y_h = std::min(min_y_h, location.y());
+                        max_y_h = std::max(max_y_h, location.y());
+                        min_z_h = std::min(min_z_h, location.z());
+                        max_z_h = std::max(max_z_h, location.z());
                     }
                 }
             }
 
-            if(have_selected_charge && sum_q > 0.0) {
+            double mean_x_e = 0.0, mean_y_e = 0.0, mean_z_e = 0.0;
+            double mean_x_h = 0.0, mean_y_h = 0.0, mean_z_h = 0.0;
 
-                const double mean_x = sum_x / sum_q;
-                const double mean_y = sum_y / sum_q;
-                const double mean_z = sum_z / sum_q;
+            if(have_electrons && sum_q_e > 0.0) {
+                mean_x_e = sum_x_e / sum_q_e;
+                mean_y_e = sum_y_e / sum_q_e;
+                mean_z_e = sum_z_e / sum_q_e;
+            }
 
-                double var_x = 0.0;
-                double var_y = 0.0;
-                double var_z = 0.0;
+            if(have_holes && sum_q_h > 0.0) {
+                mean_x_h = sum_x_h / sum_q_h;
+                mean_y_h = sum_y_h / sum_q_h;
+                mean_z_h = sum_z_h / sum_q_h;
+            }
 
-                for(unsigned int i = 0; i < charge_locations.size(); i++) {
+            double var_x_e = 0.0, var_y_e = 0.0, var_z_e = 0.0;
+            double var_x_h = 0.0, var_y_h = 0.0, var_z_h = 0.0;
 
-                    if(propagating_charges[i].getLocalTime() > time) {
-                        continue;
-                    }
+            for(unsigned int i = 0; i < charge_locations.size(); i++) {
 
-                    if(charge_states[i] == CarrierState::RECOMBINED) {
-                        continue;
-                    }
-
-                    const double q = static_cast<double>(propagating_charges[i].getCharge());
-                    const auto& location = charge_locations[i];
-
-                    const double dx = location.x() - mean_x;
-                    const double dy = location.y() - mean_y;
-                    const double dz = location.z() - mean_z;
-
-                    var_x += q * dx * dx;
-                    var_y += q * dy * dy;
-                    var_z += q * dz * dz;
+                if(propagating_charges[i].getLocalTime() > time) {
+                    continue;
                 }
 
-                const double rms_x = std::sqrt(var_x / sum_q);
-                const double rms_y = std::sqrt(var_y / sum_q);
-                const double rms_z = std::sqrt(var_z / sum_q);
-                const double rms_e = std::sqrt((var_x + var_y + var_z) / sum_q);
+                if(charge_states[i] == CarrierState::RECOMBINED) {
+                    continue;
+                }
 
-                propagation_summaries.emplace_back(time,
-                                   true,   // has_electrons (temporary combined mapping)
-                                   false,  // has_holes
-                                   mean_x,
-                                   mean_y,
-                                   mean_z,
-                                   rms_x,
-                                   rms_y,
-                                   rms_z,
-                                   rms_e,
-                                   min_x,
-                                   max_x,
-                                   min_y,
-                                   max_y,
-                                   min_z,
-                                   max_z,
-                                   0.0,  // mean_x_h
-                                   0.0,  // mean_y_h
-                                   0.0,  // mean_z_h
-                                   0.0,  // rms_x_h
-                                   0.0,  // rms_y_h
-                                   0.0,  // rms_z_h
-                                   0.0,  // rms_e_h
-                                   0.0,  // min_x_h
-                                   0.0,  // max_x_h
-                                   0.0,  // min_y_h
-                                   0.0,  // max_y_h
-                                   0.0,  // min_z_h
-                                   0.0); // max_z_h
+                const double q = static_cast<double>(propagating_charges[i].getCharge());
+                const auto& location = charge_locations[i];
+
+                if(propagating_charges[i].getType() == CarrierType::ELECTRON && have_electrons && sum_q_e > 0.0) {
+                    const double dx = location.x() - mean_x_e;
+                    const double dy = location.y() - mean_y_e;
+                    const double dz = location.z() - mean_z_e;
+
+                    var_x_e += q * dx * dx;
+                    var_y_e += q * dy * dy;
+                    var_z_e += q * dz * dz;
+                } else if(propagating_charges[i].getType() == CarrierType::HOLE && have_holes && sum_q_h > 0.0) {
+                    const double dx = location.x() - mean_x_h;
+                    const double dy = location.y() - mean_y_h;
+                    const double dz = location.z() - mean_z_h;
+
+                    var_x_h += q * dx * dx;
+                    var_y_h += q * dy * dy;
+                    var_z_h += q * dz * dz;
+                }
             }
+
+            const double rms_x_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_x_e / sum_q_e) : 0.0;
+            const double rms_y_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_y_e / sum_q_e) : 0.0;
+            const double rms_z_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_z_e / sum_q_e) : 0.0;
+            const double rms_e_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt((var_x_e + var_y_e + var_z_e) / sum_q_e) : 0.0;
+
+            const double rms_x_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_x_h / sum_q_h) : 0.0;
+            const double rms_y_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_y_h / sum_q_h) : 0.0;
+            const double rms_z_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_z_h / sum_q_h) : 0.0;
+            const double rms_e_h = (have_holes && sum_q_h > 0.0) ? std::sqrt((var_x_h + var_y_h + var_z_h) / sum_q_h) : 0.0;
+
+            propagation_summaries.emplace_back(time,
+                                            have_electrons,
+                                            have_holes,
+                                            mean_x_e,
+                                            mean_y_e,
+                                            mean_z_e,
+                                            rms_x_e,
+                                            rms_y_e,
+                                            rms_z_e,
+                                            rms_e_e,
+                                            min_x_e,
+                                            max_x_e,
+                                            min_y_e,
+                                            max_y_e,
+                                            min_z_e,
+                                            max_z_e,
+                                            mean_x_h,
+                                            mean_y_h,
+                                            mean_z_h,
+                                            rms_x_h,
+                                            rms_y_h,
+                                            rms_z_h,
+                                            rms_e_h,
+                                            min_x_h,
+                                            max_x_h,
+                                            min_y_h,
+                                            max_y_h,
+                                            min_z_h,
+                                            max_z_h);
         }
 
         // Copy the current positions to the previous positions
