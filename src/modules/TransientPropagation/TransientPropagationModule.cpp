@@ -29,6 +29,7 @@
 #include <TH2.h>
 #include <TProfile.h>
 #include <algorithm>
+#include <limits>
 
 #include "core/config/Configuration.hpp"
 #include "core/geometry/Detector.hpp"
@@ -510,59 +511,116 @@ void TransientPropagationModule::run(Event* event) {
     }
 
     if(output_propagation_summary_) {
-        for(const auto& [idx, acc] : propagation_summary_bins) {
-            if(!acc.has_data || acc.sum_q <= 0.0) {
-                continue;
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+
+        auto finalize_carrier = [&](const CarrierSummaryAccumulator& c,
+                                    bool& has_carrier,
+                                    double& mean_x,
+                                    double& mean_y,
+                                    double& mean_z,
+                                    double& rms_x,
+                                    double& rms_y,
+                                    double& rms_z,
+                                    double& rms_e,
+                                    double& min_x,
+                                    double& max_x,
+                                    double& min_y,
+                                    double& max_y,
+                                    double& min_z,
+                                    double& max_z) {
+            has_carrier = c.has_data && c.sum_q > 0.0;
+
+            if(!has_carrier) {
+                mean_x = mean_y = mean_z = nan;
+                rms_x = rms_y = rms_z = rms_e = nan;
+                min_x = max_x = min_y = max_y = min_z = max_z = nan;
+                return;
             }
 
-            const double time = static_cast<double>(idx) * output_propagation_summary_step_;
+            mean_x = c.sum_x / c.sum_q;
+            mean_y = c.sum_y / c.sum_q;
+            mean_z = c.sum_z / c.sum_q;
 
-            const double mean_x = acc.sum_x / acc.sum_q;
-            const double mean_y = acc.sum_y / acc.sum_q;
-            const double mean_z = acc.sum_z / acc.sum_q;
-
-            const double mean_x2 = acc.sum_x2 / acc.sum_q;
-            const double mean_y2 = acc.sum_y2 / acc.sum_q;
-            const double mean_z2 = acc.sum_z2 / acc.sum_q;
+            const double mean_x2 = c.sum_x2 / c.sum_q;
+            const double mean_y2 = c.sum_y2 / c.sum_q;
+            const double mean_z2 = c.sum_z2 / c.sum_q;
 
             const double var_x = std::max(0.0, mean_x2 - mean_x * mean_x);
             const double var_y = std::max(0.0, mean_y2 - mean_y * mean_y);
             const double var_z = std::max(0.0, mean_z2 - mean_z * mean_z);
 
-            const double rms_x = std::sqrt(var_x);
-            const double rms_y = std::sqrt(var_y);
-            const double rms_z = std::sqrt(var_z);
-            const double rms_e = std::sqrt(var_x + var_y + var_z);
+            rms_x = std::sqrt(var_x);
+            rms_y = std::sqrt(var_y);
+            rms_z = std::sqrt(var_z);
+            rms_e = std::sqrt(var_x + var_y + var_z);
+
+            min_x = c.min_x;
+            max_x = c.max_x;
+            min_y = c.min_y;
+            max_y = c.max_y;
+            min_z = c.min_z;
+            max_z = c.max_z;
+        };
+
+        for(const auto& [idx, acc] : propagation_summary_bins) {
+            const double time = static_cast<double>(idx) * output_propagation_summary_step_;
+
+            bool has_electrons = false;
+            bool has_holes = false;
+
+            double mean_x_e, mean_y_e, mean_z_e;
+            double rms_x_e, rms_y_e, rms_z_e, rms_e_e;
+            double min_x_e, max_x_e, min_y_e, max_y_e, min_z_e, max_z_e;
+
+            double mean_x_h, mean_y_h, mean_z_h;
+            double rms_x_h, rms_y_h, rms_z_h, rms_e_h;
+            double min_x_h, max_x_h, min_y_h, max_y_h, min_z_h, max_z_h;
+
+            finalize_carrier(acc.electrons,
+                            has_electrons,
+                            mean_x_e, mean_y_e, mean_z_e,
+                            rms_x_e, rms_y_e, rms_z_e, rms_e_e,
+                            min_x_e, max_x_e, min_y_e, max_y_e, min_z_e, max_z_e);
+
+            finalize_carrier(acc.holes,
+                            has_holes,
+                            mean_x_h, mean_y_h, mean_z_h,
+                            rms_x_h, rms_y_h, rms_z_h, rms_e_h,
+                            min_x_h, max_x_h, min_y_h, max_y_h, min_z_h, max_z_h);
+
+            if(!has_electrons && !has_holes) {
+                continue;
+            }
 
             propagation_summaries.emplace_back(time,
-                                   true,   // has_electrons (temporary combined mapping)
-                                   false,  // has_holes
-                                   mean_x,
-                                   mean_y,
-                                   mean_z,
-                                   rms_x,
-                                   rms_y,
-                                   rms_z,
-                                   rms_e,
-                                   acc.min_x,
-                                   acc.max_x,
-                                   acc.min_y,
-                                   acc.max_y,
-                                   acc.min_z,
-                                   acc.max_z,
-                                   0.0,  // mean_x_h
-                                   0.0,  // mean_y_h
-                                   0.0,  // mean_z_h
-                                   0.0,  // rms_x_h
-                                   0.0,  // rms_y_h
-                                   0.0,  // rms_z_h
-                                   0.0,  // rms_e_h
-                                   0.0,  // min_x_h
-                                   0.0,  // max_x_h
-                                   0.0,  // min_y_h
-                                   0.0,  // max_y_h
-                                   0.0,  // min_z_h
-                                   0.0); // max_z_h
+                                            has_electrons,
+                                            has_holes,
+                                            mean_x_e,
+                                            mean_y_e,
+                                            mean_z_e,
+                                            rms_x_e,
+                                            rms_y_e,
+                                            rms_z_e,
+                                            rms_e_e,
+                                            min_x_e,
+                                            max_x_e,
+                                            min_y_e,
+                                            max_y_e,
+                                            min_z_e,
+                                            max_z_e,
+                                            mean_x_h,
+                                            mean_y_h,
+                                            mean_z_h,
+                                            rms_x_h,
+                                            rms_y_h,
+                                            rms_z_h,
+                                            rms_e_h,
+                                            min_x_h,
+                                            max_x_h,
+                                            min_y_h,
+                                            max_y_h,
+                                            min_z_h,
+                                            max_z_h);
         }
     }
 
@@ -734,10 +792,11 @@ TransientPropagationModule::propagate(Event* event,
             while((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) <= current_time &&
                   (static_cast<double>(next_summary_idx) * output_propagation_summary_step_) < integration_time_) {
 
-                propagation_summary_bins[next_summary_idx].add(static_cast<double>(charge),
-                                                               position.x(),
-                                                               position.y(),
-                                                               position.z());
+                propagation_summary_bins[next_summary_idx].add(type,
+                                                                static_cast<double>(charge),
+                                                                position.x(),
+                                                                position.y(),
+                                                                position.z());
                 next_summary_idx++;
             }
         }
@@ -993,17 +1052,18 @@ TransientPropagationModule::propagate(Event* event,
         last_efield = efield;
     }
 
-    if(output_propagation_summary_ && state != CarrierState::RECOMBINED) {
+    if(output_propagation_summary_ && state != CarrierState::RECOMBINED && state != CarrierState::TRAPPED) {
         const double final_time = initial_time_local + runge_kutta.getTime();
 
         while((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) < integration_time_) {
 
             // Only contribute to bins at or after the final state time
             if((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) >= final_time) {
-                propagation_summary_bins[next_summary_idx].add(static_cast<double>(charge),
-                                                               position.x(),
-                                                               position.y(),
-                                                               position.z());
+                propagation_summary_bins[next_summary_idx].add(type,
+                                                                static_cast<double>(charge),
+                                                                position.x(),
+                                                                position.y(),
+                                                                position.z());
             }
             next_summary_idx++;
         }

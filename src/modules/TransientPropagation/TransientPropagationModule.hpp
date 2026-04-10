@@ -96,23 +96,24 @@ namespace allpix {
          * @return Total recombined, trapped and propagated charge for statistics purposes
          */
         
-        struct PropagationSummaryAccumulator {
-            double sum_q{};
-            double sum_x{};
-            double sum_y{};
-            double sum_z{};
-            double sum_x2{};
-            double sum_y2{};
-            double sum_z2{};
-
+        struct CarrierSummaryAccumulator {
             bool has_data{false};
 
-            double min_x{};
-            double max_x{};
-            double min_y{};
-            double max_y{};
-            double min_z{};
-            double max_z{};
+            double sum_q{0.0};
+            double sum_x{0.0};
+            double sum_y{0.0};
+            double sum_z{0.0};
+
+            double sum_x2{0.0};
+            double sum_y2{0.0};
+            double sum_z2{0.0};
+
+            double min_x{0.0};
+            double max_x{0.0};
+            double min_y{0.0};
+            double max_y{0.0};
+            double min_z{0.0};
+            double max_z{0.0};
 
             void add(double q, double x, double y, double z) {
                 sum_q += q;
@@ -130,27 +131,29 @@ namespace allpix {
                     min_z = max_z = z;
                     has_data = true;
                 } else {
-                    if(x < min_x) {
-                        min_x = x;
-                    }
-                    if(x > max_x) {
-                        max_x = x;
-                    }
-                    if(y < min_y) {
-                        min_y = y;
-                    }
-                    if(y > max_y) {
-                        max_y = y;
-                    }
-                    if(z < min_z) {
-                        min_z = z;
-                    }
-                    if(z > max_z) {
-                        max_z = z;
-                    }
+                    min_x = std::min(min_x, x);
+                    max_x = std::max(max_x, x);
+                    min_y = std::min(min_y, y);
+                    max_y = std::max(max_y, y);
+                    min_z = std::min(min_z, z);
+                    max_z = std::max(max_z, z);
                 }
             }
         };
+
+        struct PropagationSummaryAccumulator {
+            CarrierSummaryAccumulator electrons;
+            CarrierSummaryAccumulator holes;
+
+            void add(const CarrierType& type, double q, double x, double y, double z) {
+                if(type == CarrierType::ELECTRON) {
+                    electrons.add(q, x, y, z);
+                } else if(type == CarrierType::HOLE) {
+                    holes.add(q, x, y, z);
+                }
+            }
+        };
+        
         std::tuple<unsigned int, unsigned int, unsigned int>
         propagate(Event* event,
                   const DepositedCharge& deposit,
