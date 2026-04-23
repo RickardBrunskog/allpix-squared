@@ -2,17 +2,18 @@
   "title": "Custom Allpix Squared fork with InteractivePropagation",
   "creators": [
     {
-      "name": "Kunkler, Garret Nevis",
-      "affiliation": "KTH Royal Institute of Technology"
-    },
-    {
       "name": "Brunskog, Rickard",
       "affiliation": "KTH Royal Institute of Technology"
     },
+    {
+      "name": "Kunkler, Garret Nevis",
+      "affiliation": "KTH Royal Institute of Technology"
+    }
   ],
-  "description": "Custom fork of Allpix Squared including the InteractivePropagation which enables Coulomb forces during charge-carrier propagation (based on the TransientPropagation module.",
+  "description": "Custom fork of Allpix Squared used for detector simulations, including the InteractivePropagation module which adds Coulomb forces to the propagation.",
   "upload_type": "software",
-  "license": "MIT",
+  "access_right": "open",
+  "license": "mit",
   "keywords": [
     "Allpix Squared",
     "detector simulation",
