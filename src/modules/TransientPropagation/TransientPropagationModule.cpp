@@ -28,6 +28,8 @@
 #include <TH1.h>
 #include <TH2.h>
 #include <TProfile.h>
+#include <algorithm>
+#include <limits>
 
 #include "core/config/Configuration.hpp"
 #include "core/geometry/Detector.hpp"
@@ -88,6 +90,10 @@ TransientPropagationModule::TransientPropagationModule(Configuration& config,
     config_.setDefault<unsigned int>("max_multiplication_level", 5);
     config_.setDefault<std::string>("multiplication_model", "none");
 
+    // Rickard 2026-04-05: Added bool for outputting propagation summary objects
+    config_.setDefault<bool>("output_propagation_summary", false);
+    config_.setDefault<double>("output_propagation_summary_step", config_.get<double>("timestep"));
+
     config_.setDefault<bool>("output_linegraphs", false);
     config_.setDefault<bool>("output_linegraphs_collected", false);
     config_.setDefault<bool>("output_linegraphs_recombined", false);
@@ -115,12 +121,17 @@ TransientPropagationModule::TransientPropagationModule(Configuration& config,
 
     max_multiplication_level_ = config.get<unsigned int>("max_multiplication_level");
 
+    // Rickard 2026-04-05: Get bool for outputting propagation summary objects
+    output_propagation_summary_ = config_.get<bool>("output_propagation_summary");
+
     output_plots_ = config_.get<bool>("output_plots");
     output_linegraphs_ = config_.get<bool>("output_linegraphs");
     output_linegraphs_collected_ = config_.get<bool>("output_linegraphs_collected");
     output_linegraphs_recombined_ = config_.get<bool>("output_linegraphs_recombined");
     output_linegraphs_trapped_ = config_.get<bool>("output_linegraphs_trapped");
     output_plots_step_ = config_.get<double>("output_plots_step");
+    // Rickard 2026-04-05: Added step size for outputting propagation summary objects
+    output_propagation_summary_step_ = config_.get<double>("output_propagation_summary_step");
     output_max_gain_histo_ = config.get<unsigned int>("output_max_gain_histo");
 
     // Avoids wrong gain histogram inputs
@@ -433,6 +444,8 @@ void TransientPropagationModule::run(Event* event) {
 
     // Create vector of propagated charges to output
     std::vector<PropagatedCharge> propagated_charges;
+    std::vector<PropagationSummary> propagation_summaries;
+    std::map<size_t, PropagationSummaryAccumulator> propagation_summary_bins;
     unsigned int propagated_charges_count = 0;
     unsigned int recombined_charges_count = 0;
     unsigned int trapped_charges_count = 0;
@@ -477,15 +490,16 @@ void TransientPropagationModule::run(Event* event) {
 
             // Get position and propagate through sensor
             auto [recombined, trapped, propagated] = propagate(event,
-                                                               deposit,
-                                                               deposit.getLocalPosition(),
-                                                               deposit.getType(),
-                                                               charge_per_step,
-                                                               deposit.getLocalTime(),
-                                                               deposit.getGlobalTime(),
-                                                               0,
-                                                               propagated_charges,
-                                                               output_plot_points);
+                                                                deposit,
+                                                                deposit.getLocalPosition(),
+                                                                deposit.getType(),
+                                                                charge_per_step,
+                                                                deposit.getLocalTime(),
+                                                                deposit.getGlobalTime(),
+                                                                0,
+                                                                propagation_summary_bins,
+                                                                propagated_charges,
+                                                                output_plot_points);
 
             // Update statistics:
             recombined_charges_count += recombined;
@@ -495,6 +509,121 @@ void TransientPropagationModule::run(Event* event) {
                        << ", trapped charges : " << trapped;
         }
     }
+
+    if(output_propagation_summary_) {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+
+        auto finalize_carrier = [&](const CarrierSummaryAccumulator& c,
+                                    bool& has_carrier,
+                                    double& mean_x,
+                                    double& mean_y,
+                                    double& mean_z,
+                                    double& rms_x,
+                                    double& rms_y,
+                                    double& rms_z,
+                                    double& rms_e,
+                                    double& min_x,
+                                    double& max_x,
+                                    double& min_y,
+                                    double& max_y,
+                                    double& min_z,
+                                    double& max_z) {
+            has_carrier = c.has_data && c.sum_q > 0.0;
+
+            if(!has_carrier) {
+                mean_x = mean_y = mean_z = nan;
+                rms_x = rms_y = rms_z = rms_e = nan;
+                min_x = max_x = min_y = max_y = min_z = max_z = nan;
+                return;
+            }
+
+            mean_x = c.sum_x / c.sum_q;
+            mean_y = c.sum_y / c.sum_q;
+            mean_z = c.sum_z / c.sum_q;
+
+            const double mean_x2 = c.sum_x2 / c.sum_q;
+            const double mean_y2 = c.sum_y2 / c.sum_q;
+            const double mean_z2 = c.sum_z2 / c.sum_q;
+
+            const double var_x = std::max(0.0, mean_x2 - mean_x * mean_x);
+            const double var_y = std::max(0.0, mean_y2 - mean_y * mean_y);
+            const double var_z = std::max(0.0, mean_z2 - mean_z * mean_z);
+
+            rms_x = std::sqrt(var_x);
+            rms_y = std::sqrt(var_y);
+            rms_z = std::sqrt(var_z);
+            rms_e = std::sqrt(var_x + var_y + var_z);
+
+            min_x = c.min_x;
+            max_x = c.max_x;
+            min_y = c.min_y;
+            max_y = c.max_y;
+            min_z = c.min_z;
+            max_z = c.max_z;
+        };
+
+        for(const auto& [idx, acc] : propagation_summary_bins) {
+            const double time = static_cast<double>(idx) * output_propagation_summary_step_;
+
+            bool has_electrons = false;
+            bool has_holes = false;
+
+            double mean_x_e, mean_y_e, mean_z_e;
+            double rms_x_e, rms_y_e, rms_z_e, rms_e_e;
+            double min_x_e, max_x_e, min_y_e, max_y_e, min_z_e, max_z_e;
+
+            double mean_x_h, mean_y_h, mean_z_h;
+            double rms_x_h, rms_y_h, rms_z_h, rms_e_h;
+            double min_x_h, max_x_h, min_y_h, max_y_h, min_z_h, max_z_h;
+
+            finalize_carrier(acc.electrons,
+                            has_electrons,
+                            mean_x_e, mean_y_e, mean_z_e,
+                            rms_x_e, rms_y_e, rms_z_e, rms_e_e,
+                            min_x_e, max_x_e, min_y_e, max_y_e, min_z_e, max_z_e);
+
+            finalize_carrier(acc.holes,
+                            has_holes,
+                            mean_x_h, mean_y_h, mean_z_h,
+                            rms_x_h, rms_y_h, rms_z_h, rms_e_h,
+                            min_x_h, max_x_h, min_y_h, max_y_h, min_z_h, max_z_h);
+
+            if(!has_electrons && !has_holes) {
+                continue;
+            }
+
+            propagation_summaries.emplace_back(time,
+                                            has_electrons,
+                                            has_holes,
+                                            mean_x_e,
+                                            mean_y_e,
+                                            mean_z_e,
+                                            rms_x_e,
+                                            rms_y_e,
+                                            rms_z_e,
+                                            rms_e_e,
+                                            min_x_e,
+                                            max_x_e,
+                                            min_y_e,
+                                            max_y_e,
+                                            min_z_e,
+                                            max_z_e,
+                                            mean_x_h,
+                                            mean_y_h,
+                                            mean_z_h,
+                                            rms_x_h,
+                                            rms_y_h,
+                                            rms_z_h,
+                                            rms_e_h,
+                                            min_x_h,
+                                            max_x_h,
+                                            min_y_h,
+                                            max_y_h,
+                                            min_z_h,
+                                            max_z_h);
+        }
+    }
+
 
     // Output plots if required
     if(output_linegraphs_) {
@@ -528,6 +657,15 @@ void TransientPropagationModule::run(Event* event) {
 
     // Dispatch the message with propagated charges
     messenger_->dispatchMessage(this, std::move(propagated_charge_message), event);
+
+    // Rickard 2026-04-05: Output propagation summary objects if requested
+    if(output_propagation_summary_) {
+        // Create a new message with propagation summaries
+        auto propagation_summary_message =
+            std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
+        // Dispatch the message with propagation summaries
+        messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
+    }
 }
 
 /**
@@ -544,6 +682,7 @@ TransientPropagationModule::propagate(Event* event,
                                       const double initial_time_local,
                                       const double initial_time_global,
                                       const unsigned int level,
+                                      std::map<size_t, PropagationSummaryAccumulator>& propagation_summary_bins,
                                       std::vector<PropagatedCharge>& propagated_charges,
                                       LineGraph::OutputPlotPoints& output_plot_points) const {
 
@@ -566,6 +705,11 @@ TransientPropagationModule::propagate(Event* event,
                                         std::vector<ROOT::Math::XYZPoint>());
     }
     auto output_plot_index = output_plot_points.size() - 1;
+
+    size_t next_summary_idx = 0;
+    if(output_propagation_summary_) {
+        next_summary_idx = static_cast<size_t>(std::ceil(initial_time_local / output_propagation_summary_step_));
+    }
 
     // Store initial charge
     const unsigned int initial_charge = charge;
@@ -639,6 +783,21 @@ TransientPropagationModule::propagate(Event* event,
             while(next_idx <= time_idx) {
                 output_plot_points.at(output_plot_index).second.push_back(static_cast<ROOT::Math::XYZPoint>(position));
                 next_idx = output_plot_points.at(output_plot_index).second.size();
+            }
+        }
+
+        if(output_propagation_summary_) {
+            const double current_time = initial_time_local + runge_kutta.getTime();
+
+            while((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) <= current_time &&
+                  (static_cast<double>(next_summary_idx) * output_propagation_summary_step_) < integration_time_) {
+
+                propagation_summary_bins[next_summary_idx].add(type,
+                                                                static_cast<double>(charge),
+                                                                position.x(),
+                                                                position.y(),
+                                                                position.z());
+                next_summary_idx++;
             }
         }
 
@@ -782,6 +941,7 @@ TransientPropagationModule::propagate(Event* event,
                                                                    initial_time_local + runge_kutta.getTime(),
                                                                    initial_time_global + runge_kutta.getTime(),
                                                                    level + 1,
+                                                                   propagation_summary_bins,
                                                                    propagated_charges,
                                                                    output_plot_points);
 
@@ -890,6 +1050,23 @@ TransientPropagationModule::propagate(Event* event,
         // Save previous position and electric field
         last_position = position;
         last_efield = efield;
+    }
+
+    if(output_propagation_summary_ && state != CarrierState::RECOMBINED && state != CarrierState::TRAPPED) {
+        const double final_time = initial_time_local + runge_kutta.getTime();
+
+        while((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) < integration_time_) {
+
+            // Only contribute to bins at or after the final state time
+            if((static_cast<double>(next_summary_idx) * output_propagation_summary_step_) >= final_time) {
+                propagation_summary_bins[next_summary_idx].add(type,
+                                                                static_cast<double>(charge),
+                                                                position.x(),
+                                                                position.y(),
+                                                                position.z());
+            }
+            next_summary_idx++;
+        }
     }
 
     if(output_plots_ && !multiplication_.is<NoImpactIonization>()) {

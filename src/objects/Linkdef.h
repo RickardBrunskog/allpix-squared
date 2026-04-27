@@ -29,6 +29,8 @@
 // all dependencies can be resolved also when inlining these headers for dictionary generation.
 #pragma link C++ class allpix::Object + ;
 
+#pragma link C++ class allpix::PropagationSummary + ;
+
 #pragma link C++ class allpix::MCTrack + ;
 #pragma link C++ class allpix::Object::PointerWrapper < allpix::MCTrack> + ;
 #pragma link C++ class allpix::Object::BaseWrapper < allpix::MCTrack> + ;

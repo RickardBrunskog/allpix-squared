@@ -35,6 +35,9 @@
 #include "tools/ROOT.h"
 #include "tools/line_graphs.h"
 
+#include "objects/PropagationSummary.hpp"
+#include <map>
+
 namespace allpix {
     /**
      * @ingroup Modules
@@ -92,6 +95,65 @@ namespace allpix {
          *
          * @return Total recombined, trapped and propagated charge for statistics purposes
          */
+        
+        struct CarrierSummaryAccumulator {
+            bool has_data{false};
+
+            double sum_q{0.0};
+            double sum_x{0.0};
+            double sum_y{0.0};
+            double sum_z{0.0};
+
+            double sum_x2{0.0};
+            double sum_y2{0.0};
+            double sum_z2{0.0};
+
+            double min_x{0.0};
+            double max_x{0.0};
+            double min_y{0.0};
+            double max_y{0.0};
+            double min_z{0.0};
+            double max_z{0.0};
+
+            void add(double q, double x, double y, double z) {
+                sum_q += q;
+                sum_x += q * x;
+                sum_y += q * y;
+                sum_z += q * z;
+
+                sum_x2 += q * x * x;
+                sum_y2 += q * y * y;
+                sum_z2 += q * z * z;
+
+                if(!has_data) {
+                    min_x = max_x = x;
+                    min_y = max_y = y;
+                    min_z = max_z = z;
+                    has_data = true;
+                } else {
+                    min_x = std::min(min_x, x);
+                    max_x = std::max(max_x, x);
+                    min_y = std::min(min_y, y);
+                    max_y = std::max(max_y, y);
+                    min_z = std::min(min_z, z);
+                    max_z = std::max(max_z, z);
+                }
+            }
+        };
+
+        struct PropagationSummaryAccumulator {
+            CarrierSummaryAccumulator electrons;
+            CarrierSummaryAccumulator holes;
+
+            void add(const CarrierType& type, double q, double x, double y, double z) {
+                if(type == CarrierType::ELECTRON) {
+                    electrons.add(q, x, y, z);
+                } else if(type == CarrierType::HOLE) {
+                    holes.add(q, x, y, z);
+                }
+            }
+        };
+        
         std::tuple<unsigned int, unsigned int, unsigned int>
         propagate(Event* event,
                   const DepositedCharge& deposit,
@@ -101,11 +163,12 @@ namespace allpix {
                   const double initial_time_local,
                   const double initial_time_global,
                   const unsigned int level,
+                  std::map<size_t, PropagationSummaryAccumulator>& propagation_summary_bins,
                   std::vector<PropagatedCharge>& propagated_charges,
                   LineGraph::OutputPlotPoints& output_plot_points) const;
 
         // Local copies of configuration parameters to avoid costly lookup:
-        double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{};
+        double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{}, output_propagation_summary_step_{};
         bool output_plots_{}, output_linegraphs_{}, output_linegraphs_collected_{}, output_linegraphs_recombined_{},
             output_linegraphs_trapped_{};
         unsigned int distance_{};
@@ -131,6 +194,9 @@ namespace allpix {
 
         // Reflectivity of sensor surface (outside implants)
         double surface_reflectivity_{0};
+
+        // Rickard 2026-04-05: Added bool for whether to output propagation summary object
+        bool output_propagation_summary_{false};
 
         // Magnetic field
         bool has_magnetic_field_{};

@@ -27,6 +27,7 @@
 #include <TGraph.h>
 #include <TMultiGraph.h>
 
+
 namespace allpix {
     /**
      * @ingroup Modules
@@ -76,14 +77,15 @@ namespace allpix {
          * 
          * @return Total recombined, trapped and propagated charge for statistics purposes
          */
-        std::tuple<unsigned int, unsigned int, unsigned int> 
+        std::tuple<unsigned int, unsigned int, unsigned int>
         propagate_together(Event* event,
-                           std::vector<PropagatedCharge>& propagating_charges,
-                           std::vector<PropagatedCharge>& propagated_charges,
-                           LineGraph::OutputPlotPoints& output_plot_points) const;
+                   std::vector<PropagatedCharge>& propagating_charges,
+                   std::vector<PropagatedCharge>& propagated_charges,
+                   std::vector<PropagationSummary>& propagation_summaries,
+                   LineGraph::OutputPlotPoints& output_plot_points) const;
 
         // Local copies of configuration parameters to avoid costly lookup:
-        double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{};
+        double temperature_{}, timestep_{}, integration_time_{}, output_plots_step_{}, output_propagation_summary_step_{};
         bool output_plots_{}, output_linegraphs_{}, output_linegraphs_collected_{}, output_linegraphs_recombined_{},
             output_linegraphs_trapped_{}, output_rms_{};
         unsigned int distance_{};
@@ -133,6 +135,9 @@ namespace allpix {
 
         // Reflectivity of sensor surface (outside implants)
         double surface_reflectivity_{0};
+
+        // Rickard 2026-04-05: Bool for whether to output propagation summary objects
+        bool output_propagation_summary_{false};
 
         // Magnetic field
         bool has_magnetic_field_{};

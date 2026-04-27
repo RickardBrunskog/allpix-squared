@@ -15,13 +15,15 @@
 #include <memory>
 #include <string>
 #include <utility>
-
+#include <limits>
 #include <Eigen/Core>
 
 #include "core/utils/distributions.h"
 #include "core/utils/log.h"
 #include "objects/exceptions.h"
 #include "tools/runge_kutta.h"
+#include "objects/PropagationSummary.hpp"
+
 
 using namespace allpix;
 
@@ -45,6 +47,9 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
     config_.setDefault<double>("coulomb_distance_limit", Units::get(4e-5,"cm"));
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); // Will need to convert to V/cm to use properly (previously 5760)
+    // Rickard 2026-04-05: Added bool for outputting propagation summary objects
+    config_.setDefault<bool>("output_propagation_summary", false);
+    config_.setDefault<double>("output_propagation_summary_step", config_.get<double>("timestep"));
 
     // Models:
     config_.setDefault<std::string>("mobility_model", "jacoboni");
@@ -88,6 +93,9 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<double>("output_plots_theta", 0.0f);
     config_.setDefault<double>("output_plots_phi", 0.0f);
 
+    // Rickard 2026-04-05: Get bool for outputting propagation summary objects
+    output_propagation_summary_ = config_.get<bool>("output_propagation_summary");
+
     // Copy some variables from configuration to avoid lookups:
     temperature_ = config_.get<double>("temperature");
     timestep_ = config_.get<double>("timestep");
@@ -126,6 +134,8 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     output_linegraphs_trapped_ = config_.get<bool>("output_linegraphs_trapped");
     output_rms_ = config_.get<bool>("output_rms");
     output_plots_step_ = config_.get<double>("output_plots_step");
+    // Rickard 2026-04-05: Get step size for outputting propagation summary objects
+    output_propagation_summary_step_ = config_.get<double>("output_propagation_summary_step");
 
     // Enable multithreading of this module if multithreading is enabled and no per-event output plots are requested:
     // FIXME: Review if this is really the case or we can still use multithreading
@@ -499,6 +509,9 @@ void InteractivePropagationModule::run(Event* event) {
     // Create vector of propagated charges to output
     std::vector<PropagatedCharge> propagated_charges;
 
+    // Create vector of propagation summaries to output
+    std::vector<PropagationSummary> propagation_summaries;
+
     // List of points to plot to plot for output plots
     LineGraph::OutputPlotPoints output_plot_points;
 
@@ -608,7 +621,7 @@ void InteractivePropagationModule::run(Event* event) {
     LOG(INFO) << "Average number of charges per group is " << total_deposited_charge/propagating_charges.size() << " ("<< propagating_charges.size() <<" total)";
     
     // Propagation occurs within the following function call
-    auto [recombined_charges_count, trapped_charges_count, propagated_charges_count] = propagate_together(event, propagating_charges, propagated_charges, output_plot_points);
+    auto [recombined_charges_count, trapped_charges_count, propagated_charges_count] = propagate_together(event, propagating_charges, propagated_charges, propagation_summaries, output_plot_points);
 
     // Output plots if required
     if(output_linegraphs_) {
@@ -642,6 +655,15 @@ void InteractivePropagationModule::run(Event* event) {
 
     // Dispatch the message with propagated charges
     messenger_->dispatchMessage(this, std::move(propagated_charge_message), event);
+
+    // Rickard 2026-04-05: Add message dispatching of propagation summaries for use in other modules or for output, if enabled in the configuration file will contain the summary for each sampling step
+    if(output_propagation_summary_) {
+        // Create a new message with propagation summaries
+        auto propagation_summary_message =
+            std::make_shared<PropagationSummaryMessage>(std::move(propagation_summaries), detector_);
+        // Dispatch the message with propagation summaries
+        messenger_->dispatchMessage(this, std::move(propagation_summary_message), event);
+    }
 }
 
 // This function takes a list of propagating charges to propagate synchronously and places them in the propagated vector
@@ -649,6 +671,7 @@ std::tuple<unsigned int, unsigned int, unsigned int>
 InteractivePropagationModule::propagate_together(Event* event,
                                                  std::vector<PropagatedCharge>& propagating_charges,
                                                  std::vector<PropagatedCharge>& propagated_charges,
+                                                 std::vector<PropagationSummary>& propagation_summaries,
                                                  LineGraph::OutputPlotPoints& output_plot_points) const {
 
     unsigned int propagated_charges_count = 0;
@@ -705,6 +728,11 @@ InteractivePropagationModule::propagate_together(Event* event,
             return Eigen::Vector3d(field.x(),field.y(),field.z());
         }
 
+        if(previous_charge_locations.size() != propagating_charges.size() ||
+            charge_states.size() != propagating_charges.size()) {
+            throw ModuleError("InteractivePropagation internal vector size mismatch in coulomb_efield");
+        }
+
         for (unsigned int i = 0; i < previous_charge_locations.size(); i++){
 
             // TODO: Add check with (oc)tree object that only looks at charges within a certain distance
@@ -744,16 +772,15 @@ InteractivePropagationModule::propagate_together(Event* event,
                 dist_vector = point - local_position; // A vector between the desired points (mm)
                 dist_mag2 =  dist_vector.Mag2();
 
-                if (dist_mag2 < coulomb_distance_limit_squared_){ // Limit the following calculations to if the distance of the charge is close enough to give a significant field
-
+                if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                     dist_mag = ROOT::Math::sqrt(dist_mag2);
 
-                    interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2); // Magnitude of the force [MV/mm] (always positive)
-                    coulomb_mag_histo_ -> Fill(interaction_magnitude * 1e5); // Conversion from MV/mm to V/cm
-                    
-                    // Add this charge's field to the total field at the point
-                    field = field + dist_vector/dist_mag * sign * interaction_magnitude; 
+                    interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
+                    if(output_plots_ && std::isfinite(interaction_magnitude) && interaction_magnitude >= 0.0) {
+                        coulomb_mag_histo_->Fill(interaction_magnitude * 1e5);
+                    }
 
+                    field = field + dist_vector / dist_mag * sign * interaction_magnitude;
                 }
             }
 
@@ -772,18 +799,19 @@ InteractivePropagationModule::propagate_together(Event* event,
             dist_vector = point - mirror_position_neg;
             dist_mag2 = dist_vector.Mag2();
 
-            if (dist_mag2 < coulomb_distance_limit_squared_){
+            if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                 dist_mag = ROOT::Math::sqrt(dist_mag2);
-                field = field - dist_vector/dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2); // Mirror charges have opposite charge
+                field = field - dist_vector / dist_mag * sign *
+                        std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
             }
 
             // Apply field for positive-side mirror charge
             dist_vector = point - mirror_position_pos;
             dist_mag2 = dist_vector.Mag2();
 
-            if (dist_mag2 < coulomb_distance_limit_squared_){
+            if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                 dist_mag = ROOT::Math::sqrt(dist_mag2);
-                field = field - dist_vector/dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
+                field = field - dist_vector / dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
             }
         }
 
@@ -902,9 +930,13 @@ InteractivePropagationModule::propagate_together(Event* event,
 
     }
 
+    if(propagating_charges.empty()) {
+        return std::make_tuple(0U, 0U, 0U);
+    }
+
     // Set up variables that are changed each loop
     Eigen::Vector3d efield{};
-    allpix::PropagatedCharge &charge = propagating_charges[0];
+    allpix::PropagatedCharge charge = propagating_charges[0];
     ROOT::Math::XYZPoint position{}; // = ROOT::Math::XYZPoint();
     ROOT::Math::XYZPoint previous_position{}; // = ROOT::Math::XYZPoint();
     allpix::CarrierType type = charge.getType();
@@ -1013,6 +1045,180 @@ InteractivePropagationModule::propagate_together(Event* event,
                 rms_h_subgraph_->AddPoint(time, rms_total_h);
 
             }
+        }
+
+        if(output_propagation_summary_ && std::fmod(time, output_propagation_summary_step_) < timestep_) {
+            
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+
+            double sum_q_e = 0.0;
+            double sum_x_e = 0.0;
+            double sum_y_e = 0.0;
+            double sum_z_e = 0.0;
+
+            double sum_q_h = 0.0;
+            double sum_x_h = 0.0;
+            double sum_y_h = 0.0;
+            double sum_z_h = 0.0;
+
+            bool have_electrons = false;
+            bool have_holes = false;
+
+            double min_x_e = nan, max_x_e = nan;
+            double min_y_e = nan, max_y_e = nan;
+            double min_z_e = nan, max_z_e = nan;
+
+            double min_x_h = nan, max_x_h = nan;
+            double min_y_h = nan, max_y_h = nan;
+            double min_z_h = nan, max_z_h = nan;
+
+            for(unsigned int i = 0; i < charge_locations.size(); i++) {
+
+                if(propagating_charges[i].getLocalTime() > time) {
+                    continue;
+                }
+
+                if(charge_states[i] == CarrierState::RECOMBINED ||
+                   charge_states[i] == CarrierState::TRAPPED) {
+                    continue;
+                }
+
+
+
+                const double q = static_cast<double>(propagating_charges[i].getCharge());
+                const auto& location = charge_locations[i];
+
+                if(propagating_charges[i].getType() == CarrierType::ELECTRON) {
+                    sum_q_e += q;
+                    sum_x_e += q * location.x();
+                    sum_y_e += q * location.y();
+                    sum_z_e += q * location.z();
+
+                    if(!have_electrons) {
+                        min_x_e = max_x_e = location.x();
+                        min_y_e = max_y_e = location.y();
+                        min_z_e = max_z_e = location.z();
+                        have_electrons = true;
+                    } else {
+                        min_x_e = std::min(min_x_e, location.x());
+                        max_x_e = std::max(max_x_e, location.x());
+                        min_y_e = std::min(min_y_e, location.y());
+                        max_y_e = std::max(max_y_e, location.y());
+                        min_z_e = std::min(min_z_e, location.z());
+                        max_z_e = std::max(max_z_e, location.z());
+                    }
+                } else if(propagating_charges[i].getType() == CarrierType::HOLE) {
+                    sum_q_h += q;
+                    sum_x_h += q * location.x();
+                    sum_y_h += q * location.y();
+                    sum_z_h += q * location.z();
+
+                    if(!have_holes) {
+                        min_x_h = max_x_h = location.x();
+                        min_y_h = max_y_h = location.y();
+                        min_z_h = max_z_h = location.z();
+                        have_holes = true;
+                    } else {
+                        min_x_h = std::min(min_x_h, location.x());
+                        max_x_h = std::max(max_x_h, location.x());
+                        min_y_h = std::min(min_y_h, location.y());
+                        max_y_h = std::max(max_y_h, location.y());
+                        min_z_h = std::min(min_z_h, location.z());
+                        max_z_h = std::max(max_z_h, location.z());
+                    }
+                }
+            }
+
+            double mean_x_e = nan, mean_y_e = nan, mean_z_e = nan;
+            double mean_x_h = nan, mean_y_h = nan, mean_z_h = nan;
+
+            if(have_electrons && sum_q_e > 0.0) {
+                mean_x_e = sum_x_e / sum_q_e;
+                mean_y_e = sum_y_e / sum_q_e;
+                mean_z_e = sum_z_e / sum_q_e;
+            }
+
+            if(have_holes && sum_q_h > 0.0) {
+                mean_x_h = sum_x_h / sum_q_h;
+                mean_y_h = sum_y_h / sum_q_h;
+                mean_z_h = sum_z_h / sum_q_h;
+            }
+
+            double var_x_e = 0.0, var_y_e = 0.0, var_z_e = 0.0;
+            double var_x_h = 0.0, var_y_h = 0.0, var_z_h = 0.0;
+
+            for(unsigned int i = 0; i < charge_locations.size(); i++) {
+
+                if(propagating_charges[i].getLocalTime() > time) {
+                    continue;
+                }
+
+                if(charge_states[i] == CarrierState::RECOMBINED ||
+                   charge_states[i] == CarrierState::TRAPPED) {
+                        continue;
+                    }
+
+                const double q = static_cast<double>(propagating_charges[i].getCharge());
+                const auto& location = charge_locations[i];
+
+                if(propagating_charges[i].getType() == CarrierType::ELECTRON && have_electrons && sum_q_e > 0.0) {
+                    const double dx = location.x() - mean_x_e;
+                    const double dy = location.y() - mean_y_e;
+                    const double dz = location.z() - mean_z_e;
+
+                    var_x_e += q * dx * dx;
+                    var_y_e += q * dy * dy;
+                    var_z_e += q * dz * dz;
+                } else if(propagating_charges[i].getType() == CarrierType::HOLE && have_holes && sum_q_h > 0.0) {
+                    const double dx = location.x() - mean_x_h;
+                    const double dy = location.y() - mean_y_h;
+                    const double dz = location.z() - mean_z_h;
+
+                    var_x_h += q * dx * dx;
+                    var_y_h += q * dy * dy;
+                    var_z_h += q * dz * dz;
+                }
+            }
+
+            const double rms_x_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_x_e / sum_q_e) : nan;
+            const double rms_y_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_y_e / sum_q_e) : nan;
+            const double rms_z_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt(var_z_e / sum_q_e) : nan;
+            const double rms_e_e = (have_electrons && sum_q_e > 0.0) ? std::sqrt((var_x_e + var_y_e + var_z_e) / sum_q_e) : nan;
+
+            const double rms_x_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_x_h / sum_q_h) : nan;
+            const double rms_y_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_y_h / sum_q_h) : nan;
+            const double rms_z_h = (have_holes && sum_q_h > 0.0) ? std::sqrt(var_z_h / sum_q_h) : nan;
+            const double rms_e_h = (have_holes && sum_q_h > 0.0) ? std::sqrt((var_x_h + var_y_h + var_z_h) / sum_q_h) : nan;
+
+            propagation_summaries.emplace_back(time,
+                                            have_electrons,
+                                            have_holes,
+                                            mean_x_e,
+                                            mean_y_e,
+                                            mean_z_e,
+                                            rms_x_e,
+                                            rms_y_e,
+                                            rms_z_e,
+                                            rms_e_e,
+                                            min_x_e,
+                                            max_x_e,
+                                            min_y_e,
+                                            max_y_e,
+                                            min_z_e,
+                                            max_z_e,
+                                            mean_x_h,
+                                            mean_y_h,
+                                            mean_z_h,
+                                            rms_x_h,
+                                            rms_y_h,
+                                            rms_z_h,
+                                            rms_e_h,
+                                            min_x_h,
+                                            max_x_h,
+                                            min_y_h,
+                                            max_y_h,
+                                            min_z_h,
+                                            max_z_h);
         }
 
         // Copy the current positions to the previous positions
