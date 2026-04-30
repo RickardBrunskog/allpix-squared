@@ -56,6 +56,7 @@
 #include "GeneratorActionG4.hpp"
 #include "SDAndFieldConstruction.hpp"
 #include "SensitiveDetectorActionG4.hpp"
+#include "StepInfoUserHookG4.hpp"
 #include "TrackInfoManager.hpp"
 #include "core/config/exceptions.h"
 #include "core/geometry/DetectorModel.hpp"
@@ -422,6 +423,9 @@ void DepositionGeant4Module::run(Event* event) {
         sensor->seed(event->getRandomNumber());
     }
 
+    // Clear Geant4 step-level Rayleigh scatter information for this Allpix event
+    StepInfoUserHookG4::clearRayleighScatterInfo();
+
     // Start a single event from the beam
     LOG(TRACE) << "Enabling beam";
     auto seed1 = event->getRandomNumber();
@@ -442,6 +446,8 @@ void DepositionGeant4Module::run(Event* event) {
 
         track_info_manager_->createMCTracks();
         track_info_manager_->dispatchMessage(this, messenger_, event);
+
+        StepInfoUserHookG4::dispatchRayleighScatterMessage(this, messenger_, event);
 
         // Dispatch the necessary messages
         for(auto& sensor : sensors_) {
@@ -466,6 +472,7 @@ void DepositionGeant4Module::run(Event* event) {
             sensor->clearEventInfo();
         }
         run_manager_g4_->AbortRun();
+        StepInfoUserHookG4::clearRayleighScatterInfo();
         track_info_manager_->resetTrackInfoManager();
         throw;
     }
