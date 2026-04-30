@@ -23,6 +23,7 @@ ADD_LIBRARY(
     AllpixObjects SHARED
     Object.cpp
     PropagationSummary.cpp
+    RayleighScatter.cpp
     Pixel.cpp
     SensorCharge.cpp
     Pulse.cpp
@@ -48,6 +49,7 @@ ROOT_GENERATE_DICTIONARY(
     AllpixObjectsDictionary
     ${CMAKE_CURRENT_SOURCE_DIR}/Object.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/PropagationSummary.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RayleighScatter.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MCTrack.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/MCParticle.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/SensorCharge.hpp

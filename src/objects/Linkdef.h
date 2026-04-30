@@ -30,6 +30,7 @@
 #pragma link C++ class allpix::Object + ;
 
 #pragma link C++ class allpix::PropagationSummary + ;
+#pragma link C++ class allpix::RayleighScatter + ;
 
 #pragma link C++ class allpix::MCTrack + ;
 #pragma link C++ class allpix::Object::PointerWrapper < allpix::MCTrack> + ;
