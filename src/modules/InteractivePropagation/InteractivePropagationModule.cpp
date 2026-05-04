@@ -1279,7 +1279,11 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Execute a Runge Kutta step and update time in the vector
             auto step = runge_kutta.step();
-            charge_times[i]  = runge_kutta.getTime();
+
+            // End time of the actual drift step. This is the correct time for signal induction.
+            // It must not later be overwritten by a future detrapping time.
+            const auto signal_time = runge_kutta.getTime();
+            charge_times[i] = signal_time;
             
             // Get the new position due to the electric field
             position = convertVectorToPoint(runge_kutta.getValue());
@@ -1356,7 +1360,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 state = CarrierState::TRAPPED;
 
                 if(output_plots_) {
-                    trapping_time_histo_->Fill(runge_kutta.getTime(), charge.getCharge());
+                    trapping_time_histo_->Fill(signal_time, charge.getCharge());
                 }
 
                 // Only sample detrapping if an actual detrapping model is enabled.
@@ -1370,9 +1374,14 @@ InteractivePropagationModule::propagate_together(Event* event,
                                         std::to_string(detrap_time));
                     }
 
-                    runge_kutta.advanceTime(detrap_time);
+                    const auto detrap_at_time = signal_time + detrap_time;
 
-                    if(runge_kutta.getTime() < integration_time_) {
+                    if(detrap_at_time < integration_time_) {
+                        // The RK time is used as the next time at which this trapped carrier
+                        // should be considered again. Do not use this future time for the
+                        // pulse contribution of the current drift step.
+                        runge_kutta.advanceTime(detrap_time);
+
                         LOG(TRACE) << "Charge carrier will detrap after "
                                 << Units::display(detrap_time, {"ns", "us"});
 
@@ -1381,6 +1390,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 static_cast<double>(Units::convert(detrap_time, "ns")),
                                 charge.getCharge());
                         }
+                    } else {
+                        // Detrapping would occur after the integration window. Keep the carrier
+                        // trapped and keep the RK time at the physical trapping time.
+                        LOG(TRACE) << "Charge carrier trapped at "
+                                << Units::display(signal_time, {"ns", "ps"})
+                                << " and will not detrap within the integration time";
                     }
                 }
             }
@@ -1407,7 +1422,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             LOG(TRACE) << "Moving carriers below pixel " << Pixel::Index(xpixel, ypixel) << " from "
                     << Units::display(previous_position, {"um", "mm"}) << " to "
                     << Units::display(position, {"um", "mm"}) << ", "
-                    << Units::display(runge_kutta.getTime(), "ns");
+                    << Units::display(signal_time, "ns");
 
             for(const auto& pixel_index : neighbors) {
                 auto ramo = detector_->getWeightingPotential(position, pixel_index);
@@ -1429,7 +1444,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 // Create pulse if it doesn't exist. Store induced charge in the returned pulse iterator
                 auto pixel_map_iterator = pixel_map_vector[i].emplace(pixel_index, Pulse(timestep_, integration_time_));
 
-                const auto pulse_time = runge_kutta.getTime();
+                const auto pulse_time = signal_time;
 
                 if(!std::isfinite(pulse_time) || pulse_time < 0 ||
                 pulse_time > integration_time_ + 100.0 * timestep_) {
@@ -1457,30 +1472,30 @@ InteractivePropagationModule::propagate_together(Event* event,
                     auto inPixel_um_y = (position.y() - model_->getPixelCenter(xpixel, ypixel).y()) * 1e3;
 
                     potential_difference_->Fill(std::fabs(ramo - last_ramo));
-                    induced_charge_histo_->Fill(runge_kutta.getTime(), induced);
-                    induced_charge_vs_depth_histo_->Fill(runge_kutta.getTime(), position.z(), induced);
+                    induced_charge_histo_->Fill(signal_time, induced);
+                    induced_charge_vs_depth_histo_->Fill(signal_time, position.z(), induced);
                     induced_charge_map_->Fill(inPixel_um_x, inPixel_um_y, induced);
                     if(type == CarrierType::ELECTRON) {
-                        induced_charge_e_histo_->Fill(runge_kutta.getTime(), induced);
+                        induced_charge_e_histo_->Fill(signal_time, induced);
                         induced_charge_e_vs_depth_histo_->Fill(
-                            runge_kutta.getTime(), position.z(), induced);
+                            signal_time, position.z(), induced);
                         induced_charge_e_map_->Fill(inPixel_um_x, inPixel_um_y, induced);
                     } else {
-                        induced_charge_h_histo_->Fill(runge_kutta.getTime(), induced);
+                        induced_charge_h_histo_->Fill(signal_time, induced);
                         induced_charge_h_vs_depth_histo_->Fill(
-                            runge_kutta.getTime(), position.z(), induced);
+                            signal_time, position.z(), induced);
                         induced_charge_h_map_->Fill(inPixel_um_x, inPixel_um_y, induced);
                     }
                     if(!multiplication_.is<NoImpactIonization>()) { //TODO: If muliplication isn't reimplemented, remove the primary and secondary histogram
-                        induced_charge_primary_histo_->Fill(runge_kutta.getTime(), induced_primary);
-                        induced_charge_secondary_histo_->Fill(runge_kutta.getTime(), induced_secondary);
+                        induced_charge_primary_histo_->Fill(signal_time, induced_primary);
+                        induced_charge_secondary_histo_->Fill(signal_time, induced_secondary);
                         if(type == CarrierType::ELECTRON) {
-                            induced_charge_primary_e_histo_->Fill(runge_kutta.getTime(), induced_primary);
-                            induced_charge_secondary_e_histo_->Fill(runge_kutta.getTime(),
+                            induced_charge_primary_e_histo_->Fill(signal_time, induced_primary);
+                            induced_charge_secondary_e_histo_->Fill(signal_time,
                                                                     induced_secondary);
                         } else {
-                            induced_charge_primary_h_histo_->Fill(runge_kutta.getTime(), induced_primary);
-                            induced_charge_secondary_h_histo_->Fill(runge_kutta.getTime(),
+                            induced_charge_primary_h_histo_->Fill(signal_time, induced_primary);
+                            induced_charge_secondary_h_histo_->Fill(signal_time,
                                                                     induced_secondary);
                         }
                     }
@@ -1510,7 +1525,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         // Create PropagatedCharge object and add it to the list
         auto local_position = convertVectorToPoint(runge_kutta.getValue());
         auto global_position = detector_->getGlobalPosition(local_position);
-        auto local_time = runge_kutta.getTime();
+        auto local_time = charge_times[i];
         auto global_time = local_time - charge.getLocalTime() + charge.getGlobalTime();
 
         const DepositedCharge* deposit = charge.getDepositedCharge();
@@ -1525,7 +1540,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                         deposit);
 
         LOG(DEBUG) << " Propagated " << charge << " (initial: " << charge.getCharge() << ") to "
-                << Units::display(local_position, {"mm", "um"}) << " in " << Units::display(runge_kutta.getTime(), "ns")
+                << Units::display(local_position, {"mm", "um"}) << " in " << Units::display(signal_time, "ns")
                 << " time, induced " << Units::display(propagated_charge.getCharge(), {"e"})
                 << ", final state: " << allpix::to_string(charge_states[i]);
 
@@ -1536,7 +1551,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         if(charge_states[i] == CarrierState::RECOMBINED) {
             recombined_charges_count += charge.getCharge();
             if(output_plots_) {
-                recombination_time_histo_->Fill(runge_kutta.getTime(), charge.getCharge());
+                recombination_time_histo_->Fill(signal_time, charge.getCharge());
             }
         } else if(charge_states[i] == CarrierState::TRAPPED) { // If the charge still has the TRAPPED state at the integration time, it is clear that the detrapping time was sufficiently large
             trapped_charges_count += charge.getCharge();
@@ -1545,7 +1560,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         }
     
         if(output_plots_) {
-            drift_time_histo_->Fill(static_cast<double>(Units::convert(runge_kutta.getTime(), "ns")), charge.getCharge()); //TODO: Check whether we need to remove the "dead time" before deposition
+            drift_time_histo_->Fill(static_cast<double>(Units::convert(signal_time, "ns")), charge.getCharge()); //TODO: Check whether we need to remove the "dead time" before deposition
             group_size_histo_->Fill(charge.getCharge());
         }
     }
