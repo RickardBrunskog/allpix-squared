@@ -1540,7 +1540,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                         deposit);
 
         LOG(DEBUG) << " Propagated " << charge << " (initial: " << charge.getCharge() << ") to "
-                << Units::display(local_position, {"mm", "um"}) << " in " << Units::display(signal_time, "ns")
+                << Units::display(local_position, {"mm", "um"}) << " in " << Units::display(local_time, "ns")
                 << " time, induced " << Units::display(propagated_charge.getCharge(), {"e"})
                 << ", final state: " << allpix::to_string(charge_states[i]);
 
@@ -1551,7 +1551,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         if(charge_states[i] == CarrierState::RECOMBINED) {
             recombined_charges_count += charge.getCharge();
             if(output_plots_) {
-                recombination_time_histo_->Fill(signal_time, charge.getCharge());
+                recombination_time_histo_->Fill(local_time, charge.getCharge());
             }
         } else if(charge_states[i] == CarrierState::TRAPPED) { // If the charge still has the TRAPPED state at the integration time, it is clear that the detrapping time was sufficiently large
             trapped_charges_count += charge.getCharge();
@@ -1560,7 +1560,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         }
     
         if(output_plots_) {
-            drift_time_histo_->Fill(static_cast<double>(Units::convert(signal_time, "ns")), charge.getCharge()); //TODO: Check whether we need to remove the "dead time" before deposition
+            drift_time_histo_->Fill(static_cast<double>(Units::convert(local_time, "ns")), charge.getCharge()); //TODO: Check whether we need to remove the "dead time" before deposition
             group_size_histo_->Fill(charge.getCharge());
         }
     }
