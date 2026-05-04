@@ -1428,18 +1428,28 @@ InteractivePropagationModule::propagate_together(Event* event,
 
                 // Create pulse if it doesn't exist. Store induced charge in the returned pulse iterator
                 auto pixel_map_iterator = pixel_map_vector[i].emplace(pixel_index, Pulse(timestep_, integration_time_));
+
+                const auto pulse_time = runge_kutta.getTime();
+
+                if(!std::isfinite(pulse_time) || pulse_time < 0 ||
+                pulse_time > integration_time_ + 100.0 * timestep_) {
+                    throw ModuleError("InteractivePropagation tried to add pulse charge at invalid time: " +
+                                    std::to_string(pulse_time));
+                }
+
+                if(pulse_time > integration_time_) {
+                    LOG(TRACE) << "Skipping pulse contribution outside integration time at "
+                            << Units::display(pulse_time, {"ns", "ps"})
+                            << " > " << Units::display(integration_time_, {"ns", "ps"});
+                    continue;
+                }
+
                 try {
-                    if(!std::isfinite(runge_kutta.getTime()) ||
-                        runge_kutta.getTime() < 0 ||
-                        runge_kutta.getTime() > integration_time_ + timestep_) {
-                            throw ModuleError("InteractivePropagation tried to add pulse charge at invalid time: " +
-                                            std::to_string(runge_kutta.getTime()));
-                    }
-                    pixel_map_iterator.first->second.addCharge(induced, runge_kutta.getTime());
+                    pixel_map_iterator.first->second.addCharge(induced, pulse_time);
                 } catch(const PulseBadAllocException& e) {
                     LOG(ERROR) << e.what() << std::endl
                             << "Ignoring pulse contribution at time "
-                            << Units::display(runge_kutta.getTime(), {"ms", "us", "ns"});
+                            << Units::display(pulse_time, {"ms", "us", "ns"});
                 }
 
                 if(output_plots_) {
