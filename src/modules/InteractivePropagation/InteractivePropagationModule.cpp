@@ -17,12 +17,14 @@
 #include <utility>
 #include <limits>
 #include <Eigen/Core>
+#include <cmath>
 
 #include "core/utils/distributions.h"
 #include "core/utils/log.h"
 #include "objects/exceptions.h"
 #include "tools/runge_kutta.h"
 #include "objects/PropagationSummary.hpp"
+
 
 
 using namespace allpix;
@@ -56,6 +58,8 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<std::string>("recombination_model", "none");
     config_.setDefault<std::string>("trapping_model", "none");
     config_.setDefault<std::string>("detrapping_model", "none");
+    // Guard against detrapping_model == "none" 
+    detrapping_enabled_ = (config_.get<std::string>("detrapping_model") != "none");
 
     config_.setDefault<double>("temperature", 293.15);
     config_.setDefault<unsigned int>("distance", 1);
@@ -1245,11 +1249,18 @@ InteractivePropagationModule::propagate_together(Event* event,
             }
             // Now the propagations are calculated only for those in the proper range
 
-            if(state == CarrierState::TRAPPED){ 
-                // If it reaches here, it must be within the time range and previously set to trapped. So, we can remove the trapped state and continue propagation
+            if(state == CarrierState::TRAPPED) {
+                // Without detrapping, trapped carriers remain trapped permanently.
+                if(!detrapping_enabled_) {
+                    continue;
+                }
+                // With detrapping enabled, reaching this time window means the sampled
+                // detrapping time has elapsed and the carrier resumes motion.
                 state = CarrierState::MOTION;
-            }else if(state == CarrierState::RECOMBINED || state == CarrierState::HALTED || state == CarrierState::UNKNOWN){
-                // I don't think any charges will reach here since they would have to be advanced forward with one of these states.
+
+            } else if(state == CarrierState::RECOMBINED ||
+                    state == CarrierState::HALTED ||
+                    state == CarrierState::UNKNOWN) {
                 continue;
             }
             // At this point, the state must be MOTION and we continue with the propagation
@@ -1343,19 +1354,33 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Check if the charge carrier has been trapped:
             if(trapping_(type, uniform_distribution(event->getRandomEngine()), timestep_, efield.norm())) {
                 state = CarrierState::TRAPPED;
+
                 if(output_plots_) {
                     trapping_time_histo_->Fill(runge_kutta.getTime(), charge.getCharge());
                 }
-                // Check the detrapping
-                auto detrap_time = detrapping_(type, uniform_distribution(event->getRandomEngine()), efield.norm());
-                runge_kutta.advanceTime(detrap_time);
 
-                if((runge_kutta.getTime()) < integration_time_) {
-                    
-                    // Prepare detrapping here since we have access to detrap_time. The charge will continue to propagate if it is found in the time integration window later on.
-                    LOG(TRACE) << "Charge carrier will detrap after " << Units::display(detrap_time, {"ns", "us"});
-                    if(output_plots_) {
-                        detrapping_time_histo_->Fill(static_cast<double>(Units::convert(detrap_time, "ns")), charge.getCharge());
+                // Only sample detrapping if an actual detrapping model is enabled.
+                // For detrapping_model = "none", the carrier remains trapped permanently.
+                if(detrapping_enabled_) {
+                    const auto detrap_time =
+                        detrapping_(type, uniform_distribution(event->getRandomEngine()), efield.norm());
+
+                    if(!std::isfinite(detrap_time) || detrap_time < 0) {
+                        throw ModuleError("InteractivePropagation received invalid detrapping time: " +
+                                        std::to_string(detrap_time));
+                    }
+
+                    runge_kutta.advanceTime(detrap_time);
+
+                    if(runge_kutta.getTime() < integration_time_) {
+                        LOG(TRACE) << "Charge carrier will detrap after "
+                                << Units::display(detrap_time, {"ns", "us"});
+
+                        if(output_plots_) {
+                            detrapping_time_histo_->Fill(
+                                static_cast<double>(Units::convert(detrap_time, "ns")),
+                                charge.getCharge());
+                        }
                     }
                 }
             }
@@ -1404,6 +1429,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                 // Create pulse if it doesn't exist. Store induced charge in the returned pulse iterator
                 auto pixel_map_iterator = pixel_map_vector[i].emplace(pixel_index, Pulse(timestep_, integration_time_));
                 try {
+                    if(!std::isfinite(runge_kutta.getTime()) ||
+                        runge_kutta.getTime() < 0 ||
+                        runge_kutta.getTime() > integration_time_ + timestep_) {
+                            throw ModuleError("InteractivePropagation tried to add pulse charge at invalid time: " +
+                                            std::to_string(runge_kutta.getTime()));
+                    }
                     pixel_map_iterator.first->second.addCharge(induced, runge_kutta.getTime());
                 } catch(const PulseBadAllocException& e) {
                     LOG(ERROR) << e.what() << std::endl

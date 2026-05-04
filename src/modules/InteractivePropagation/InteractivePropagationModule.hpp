@@ -116,6 +116,9 @@ namespace allpix {
         // Toggle for whether to ignore mirror charges
         bool include_mirror_charges_{};
 
+        // Guard for detrapping_model == "none"
+        bool detrapping_enabled_{false};
+
         // Models for electron and hole mobility and lifetime
         Mobility mobility_;
         Recombination recombination_;
