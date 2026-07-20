@@ -125,6 +125,33 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     
     coulomb_distance_limit_squared_ = config.get<double>("coulomb_distance_limit") * config.get<double>("coulomb_distance_limit") * 1e2; // cm^2 -> mm^2
     coulomb_field_limit_ = config.get<double>("coulomb_field_limit") * 1e-5; // Convert from V/cm to MV/mm (internal field units)
+
+    // Store the coulomb_field_limit_ 
+
+    const auto configured_coulomb_field_limit =
+    config_.get<double>("coulomb_field_limit");
+
+    coulomb_field_limit_ =
+        configured_coulomb_field_limit * 1e-5;
+
+    LOG(WARNING)
+        << "[COULOMB_DEBUG] Configured coulomb_field_limit:"
+        << "\n  raw internal value = "
+        << configured_coulomb_field_limit
+        << "\n  converted back to V/cm = "
+        << Units::convert(
+            configured_coulomb_field_limit,
+            "V/cm"
+        )
+        << " V/cm"
+        << "\n  stored coulomb_field_limit_ = "
+        << coulomb_field_limit_
+        << "\n  stored value converted back to V/cm = "
+        << Units::convert(
+            coulomb_field_limit_,
+            "V/cm"
+        )
+        << " V/cm";
     // coulomb_field_limit_squared_ = config.get<double>("coulomb_field_limit") * config.get<double>("coulomb_field_limit") * 1e-10; // Convert from (V/cm)^2 to (MV/mm)^2 (internal field units)
 
     output_plots_ = config_.get<bool>("output_plots");
@@ -707,6 +734,10 @@ InteractivePropagationModule::propagate_together(Event* event,
     int numSamePos = 0; // Counter for debugging the dynamic field collision detection
     unsigned int current_index = 0; // Used for ignoring the current charge from the Coulomb field
 
+    // Temporary runtime diagnostics:
+    bool coulomb_debug_first_pair_logged = false;
+    bool coulomb_debug_first_cap_logged = false;
+
     // Computes the coulomb force component of the e-field given a desired local point
     auto coulomb_efield = [&](ROOT::Math::XYZPoint point) -> Eigen::Vector3d {
 
@@ -774,6 +805,13 @@ InteractivePropagationModule::propagate_together(Event* event,
 
                 if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                     dist_mag = ROOT::Math::sqrt(dist_mag2);
+
+                    const auto uncapped_interaction_magnitude =
+                        coulomb_K_
+                        / relative_permittivity_
+                        * static_cast<double>(q)
+                        / dist_mag2;
+
 
                     interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
                     if(output_plots_ && std::isfinite(interaction_magnitude) && interaction_magnitude >= 0.0) {
