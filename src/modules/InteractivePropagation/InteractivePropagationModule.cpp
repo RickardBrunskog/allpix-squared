@@ -45,8 +45,8 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<double>("integration_time", Units::get(25, "ns"));
     config_.setDefault<unsigned int>("charge_per_step", 1);
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
-    config_.setDefault<double>("coulomb_distance_limit", Units::get(4e-5,"cm"));
-    config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); // Will need to convert to V/cm to use properly (previously 5760)
+    config_.setDefault<double>("coulomb_distance_limit", Units::get(100,"um"));
+    config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); 
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
     config_.setDefault<double>("output_propagation_summary_step", config_.get<double>("timestep"));
@@ -124,7 +124,7 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     }
     
     coulomb_distance_limit_squared_ = config.get<double>("coulomb_distance_limit") * config.get<double>("coulomb_distance_limit") * 1e2; // cm^2 -> mm^2
-    // coulomb_field_limit_ = config.get<double>("coulomb_field_limit") * 1e-5; // Convert from V/cm to MV/mm (internal field units)
+    // coulomb_field_limit_ = config.get<double>("coulomb_field_limit"); // Convert from V/cm to MV/mm (internal field units)
 
     // Store the coulomb_field_limit_ 
 
@@ -132,7 +132,7 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.get<double>("coulomb_field_limit");
 
     coulomb_field_limit_ =
-        configured_coulomb_field_limit * 1e-5;
+        configured_coulomb_field_limit;
 
     LOG(WARNING)
         << "[COULOMB_DEBUG] Configured coulomb_field_limit:"
