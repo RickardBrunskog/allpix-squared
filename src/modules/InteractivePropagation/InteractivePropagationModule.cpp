@@ -529,7 +529,10 @@ void InteractivePropagationModule::initialize() {
                       "Direct Coulomb Field Interaction Magnitude;Interaction Field Magnitude [V/cm];Count",
                       200, // Number of bins for the field magnitude
                       0,   // Minimum field magnitude
-                      coulomb_field_limit_ * 1e5 // Maximum field magnitude [MV/mm -> V/cm]
+                      Units::convert(
+                        coulomb_field_limit_,
+                        "V/cm"
+                    )
             );
     }
 }
@@ -645,12 +648,158 @@ void InteractivePropagationModule::run(Event* event) {
         }
     }
     
-    if (propagating_charges.size() > max_charge_groups_){
-        LOG(WARNING) << "Number of charge groups (" << propagating_charges.size() << ") exceeded set limit of " << max_charge_groups_ 
-            << " due to the large number of deposits with low charge quantity (true limit = set limit + number of deposits)";
+    if(max_charge_groups_ != 0 &&
+    propagating_charges.size() > max_charge_groups_) {
+
+        LOG(WARNING)
+            << "Number of charge groups ("
+            << propagating_charges.size()
+            << ") exceeded set limit of "
+            << max_charge_groups_
+            << " due to the large number of deposits with low "
+            "charge quantity (true limit = set limit + number "
+            "of deposits)";
     }
-    
-    LOG(INFO) << "Average number of charges per group is " << total_deposited_charge/propagating_charges.size() << " ("<< propagating_charges.size() <<" total)";
+
+    if(propagating_charges.empty()) {
+        LOG(INFO)
+            << "No applicable charge groups were produced for this event";
+    } else {
+        const double average_charges_per_group =
+            static_cast<double>(
+                total_deposited_charge
+            )
+            / static_cast<double>(
+                propagating_charges.size()
+            );
+
+        LOG(INFO)
+            << "Average number of charges per group is "
+            << average_charges_per_group
+            << " ("
+            << propagating_charges.size()
+            << " total)";
+    }
+
+    // Diagnose the temporal structure that a fully coupled RK4
+    // implementation must handle. Splitting one deposit into many
+    // charge groups produces repeated entries with the same activation
+    // time, so the number of unique times can be much smaller than the
+    // number of groups.
+    std::map<double, unsigned int>
+        groups_by_deposition_time;
+
+    for(const auto& propagating_charge :
+        propagating_charges) {
+
+        groups_by_deposition_time[
+            propagating_charge.getLocalTime()
+        ]++;
+    }
+
+    if(!groups_by_deposition_time.empty()) {
+
+        const double earliest_deposition_time =
+            groups_by_deposition_time.begin()->first;
+
+        const double latest_deposition_time =
+            groups_by_deposition_time.rbegin()->first;
+
+        unsigned int groups_active_at_zero = 0;
+        unsigned int groups_active_by_midpoint = 0;
+        unsigned int groups_active_before_step_end = 0;
+
+        for(const auto& [
+                deposition_time,
+                number_of_groups
+            ] : groups_by_deposition_time) {
+
+            if(deposition_time <= 0.0) {
+                groups_active_at_zero +=
+                    number_of_groups;
+            }
+
+            if(deposition_time <=
+            0.5 * timestep_) {
+
+                groups_active_by_midpoint +=
+                    number_of_groups;
+            }
+
+            if(deposition_time <
+            timestep_) {
+
+                groups_active_before_step_end +=
+                    number_of_groups;
+            }
+        }
+
+        const double deposition_time_span =
+            latest_deposition_time
+            - earliest_deposition_time;
+
+        LOG(WARNING)
+            << "[COUPLED_RK4_ACTIVATION_SUMMARY]"
+            << "\n  total charge groups = "
+            << propagating_charges.size()
+            << "\n  unique exact deposition times = "
+            << groups_by_deposition_time.size()
+            << "\n  earliest deposition time = "
+            << Units::convert(
+                earliest_deposition_time,
+                "ns"
+            )
+            << " ns"
+            << "\n  latest deposition time = "
+            << Units::convert(
+                latest_deposition_time,
+                "ns"
+            )
+            << " ns"
+            << "\n  deposition-time span = "
+            << Units::convert(
+                deposition_time_span,
+                "ns"
+            )
+            << " ns"
+            << "\n  span / timestep = "
+            << deposition_time_span
+                / timestep_
+            << "\n  groups active at t = 0 = "
+            << groups_active_at_zero
+            << "\n  groups active by K2/K3 midpoint = "
+            << groups_active_by_midpoint
+            << "\n  groups deposited before first step end = "
+            << groups_active_before_step_end;
+
+        unsigned int displayed_times = 0;
+
+        for(const auto& [
+                deposition_time,
+                number_of_groups
+            ] : groups_by_deposition_time) {
+
+            if(displayed_times >= 20) {
+                break;
+            }
+
+            LOG(WARNING)
+                << "[COUPLED_RK4_ACTIVATION_TIME]"
+                << "\n  activation index = "
+                << displayed_times
+                << "\n  deposition time = "
+                << Units::convert(
+                    deposition_time,
+                    "ns"
+                )
+                << " ns"
+                << "\n  groups at this time = "
+                << number_of_groups;
+
+            displayed_times++;
+        }
+    }
+
     LOG(WARNING)
         << "[COULOMB_DEBUG_EVENT]"
         << "\n  event number = "
@@ -1191,7 +1340,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                         && interaction_magnitude >= 0.0
                     ) {
                         coulomb_mag_histo_->Fill(
-                            interaction_magnitude * 1e5
+                            Units::convert(
+                                interaction_magnitude,
+                                "V/cm"
+                            )
                         );
                     }
 
@@ -2054,27 +2206,78 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Physics effects:
 
-            // Check if charge carrier is still alive:
-            if(recombination_(type, doping, uniform_distribution(event->getRandomEngine()), timestep_)) {
-                state = CarrierState::RECOMBINED;
+            // Apply stochastic bulk processes only while the carrier is
+            // still moving. A collected or recombined carrier must not
+            // subsequently become trapped.
+            if(
+                state == CarrierState::MOTION
+                && recombination_(
+                    type,
+                    doping,
+                    uniform_distribution(
+                        event->getRandomEngine()
+                    ),
+                    timestep_
+                )
+            ) {
+                state =
+                    CarrierState::RECOMBINED;
             }
-    
-            // Check if the charge carrier has been trapped:
-            if(trapping_(type, uniform_distribution(event->getRandomEngine()), timestep_, efield.norm())) {
-                state = CarrierState::TRAPPED;
-                if(output_plots_) {
-                    trapping_time_histo_->Fill(runge_kutta.getTime(), charge.getCharge());
-                }
-                // Check the detrapping
-                auto detrap_time = detrapping_(type, uniform_distribution(event->getRandomEngine()), efield.norm());
-                runge_kutta.advanceTime(detrap_time);
 
-                if((runge_kutta.getTime()) < integration_time_) {
-                    
-                    // Prepare detrapping here since we have access to detrap_time. The charge will continue to propagate if it is found in the time integration window later on.
-                    LOG(TRACE) << "Charge carrier will detrap after " << Units::display(detrap_time, {"ns", "us"});
+            if(
+                state == CarrierState::MOTION
+                && trapping_(
+                    type,
+                    uniform_distribution(
+                        event->getRandomEngine()
+                    ),
+                    timestep_,
+                    efield.norm()
+                )
+            ) {
+                state =
+                    CarrierState::TRAPPED;
+
+                if(output_plots_) {
+                    trapping_time_histo_->Fill(
+                        runge_kutta.getTime(),
+                        charge.getCharge()
+                    );
+                }
+
+                const auto detrap_time =
+                    detrapping_(
+                        type,
+                        uniform_distribution(
+                            event->getRandomEngine()
+                        ),
+                        efield.norm()
+                    );
+
+                runge_kutta.advanceTime(
+                    detrap_time
+                );
+
+                if(runge_kutta.getTime() <
+                integration_time_) {
+
+                    LOG(TRACE)
+                        << "Charge carrier will detrap after "
+                        << Units::display(
+                            detrap_time,
+                            {"ns", "us"}
+                        );
+
                     if(output_plots_) {
-                        detrapping_time_histo_->Fill(static_cast<double>(Units::convert(detrap_time, "ns")), charge.getCharge());
+                        detrapping_time_histo_->Fill(
+                            static_cast<double>(
+                                Units::convert(
+                                    detrap_time,
+                                    "ns"
+                                )
+                            ),
+                            charge.getCharge()
+                        );
                     }
                 }
             }
