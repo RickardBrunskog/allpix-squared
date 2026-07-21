@@ -123,7 +123,7 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
         LOG(WARNING) << "Coulomb repulsion is enabled but relative permittivity is set to one. Check that the parameter relative_permittivity isn't misspelled or ommited.";
     }
     
-    coulomb_distance_limit_squared_ = config.get<double>("coulomb_distance_limit") * config.get<double>("coulomb_distance_limit") * 1e2; // cm^2 -> mm^2
+    coulomb_distance_limit_squared_ = config.get<double>("coulomb_distance_limit") * config.get<double>("coulomb_distance_limit")
     // coulomb_field_limit_ = config.get<double>("coulomb_field_limit"); // Convert from V/cm to MV/mm (internal field units)
 
     // Store the coulomb_field_limit_ 
