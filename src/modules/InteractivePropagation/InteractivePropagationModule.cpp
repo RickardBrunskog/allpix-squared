@@ -764,7 +764,6 @@ InteractivePropagationModule::propagate_together(Event* event,
     std::vector<double> charge_times; // Most recent time for all of the charges (by the end of propagation they should all be aligned)
     std::vector<allpix::CarrierState> charge_states; // The state of propagation of each charge group (whether it's propagated, trapped, or halted)
     double_t time = 0; // The current time threshold (we only propagate charges near this time)
-    unsigned int current_index = 0; // Used for ignoring the current charge from the Coulomb field
 
     // Temporary diagnostic counter:
     unsigned int coulomb_debug_call_count = 0; // Checking the calls
@@ -902,7 +901,12 @@ InteractivePropagationModule::propagate_together(Event* event,
     };
 
     // Computes the coulomb force component of the e-field given a desired local point
-    auto coulomb_efield =[&](double evaluation_time, ROOT::Math::XYZPoint point) -> Eigen::Vector3d {
+    auto coulomb_efield =
+        [&](double evaluation_time,
+            const ROOT::Math::XYZPoint& point,
+            unsigned int target_index,
+            const std::vector<ROOT::Math::XYZPoint>& source_positions)
+            -> Eigen::Vector3d {
 
         
         const bool debug_this_call =
@@ -954,12 +958,16 @@ InteractivePropagationModule::propagate_together(Event* event,
             );
         }
 
-        if(previous_charge_locations.size() != propagating_charges.size() ||
-            charge_states.size() != propagating_charges.size()) {
-            throw ModuleError("InteractivePropagation internal vector size mismatch in coulomb_efield");
+        if(source_positions.size() != propagating_charges.size() ||
+            charge_states.size() != propagating_charges.size() ||
+            target_index >= propagating_charges.size()) {
+            throw ModuleError(
+                "InteractivePropagation internal vector size or target-index "
+                "mismatch in coulomb_efield"
+            );
         }
 
-        for (unsigned int i = 0; i < previous_charge_locations.size(); i++){
+        for(unsigned int i = 0; i < source_positions.size(); i++) {
 
             // TODO: Add check with (oc)tree object that only looks at charges within a certain distance
 
@@ -993,10 +1001,10 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Do not modify the physical source position here: mirror-charge
             // calculations should continue to use the actual source position.
             local_position =
-                previous_charge_locations[i];
+                source_positions[i];
 
             const bool source_overlaps_target =
-                current_index != i
+                target_index != i
                 && local_position == point;
 
             if(source_overlaps_target) {
@@ -1009,14 +1017,14 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Calculate the coulomb field due to charges that aren't the current charge
                 // The calculation needs to be in the if-statement rather than a terminiation/continue since we still want to include the mirror charges of the current charge
-            if(current_index == i) {
+            if(target_index == i) {
                 debug_sources_self++;
             } else {
 
                 if(source_overlaps_target) {
                     dist_vector =
                         deterministic_overlap_separation(
-                            current_index,
+                            target_index,
                             i
                         );
                 } else {
@@ -1073,7 +1081,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             << "\n  source group index = "
                             << i
                             << "\n  target group index = "
-                            << current_index
+                            << target_index
                             << "\n  source charge = "
                             << q
                             << " e"
@@ -1143,7 +1151,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             << "\n  source group index = "
                             << i
                             << "\n  target group index = "
-                            << current_index
+                            << target_index
                             << "\n  separation = "
                             << Units::convert(
                                 dist_mag,
@@ -1256,13 +1264,13 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << " ns"
                 << "\n  target deposition time = "
                 << Units::convert(
-                    propagating_charges[current_index]
+                    propagating_charges[target_index]
                         .getLocalTime(),
                     "ns"
                 )
                 << " ns"
                 << "\n  target group index = "
-                << current_index
+                << target_index
                 << "\n  number of propagating groups = "
                 << propagating_charges.size()
                 << "\n  Coulomb enabled = "
@@ -1345,17 +1353,22 @@ InteractivePropagationModule::propagate_together(Event* event,
         return output;
     };
 
-    // Define lambda functions to compute the charge carrier velocity with or without magnetic field
+    // Calculate the velocity of one target charge using an explicitly supplied
+    // common source-position state.
     std::function<
         Eigen::Vector3d(
             double,
             const Eigen::Vector3d&,
-            allpix::CarrierType type
+            allpix::CarrierType,
+            unsigned int,
+            const std::vector<ROOT::Math::XYZPoint>&
         )
     > carrier_velocity_noB =
         [&](double evaluation_time,
             const Eigen::Vector3d& cur_pos,
-            allpix::CarrierType type)
+            allpix::CarrierType type,
+            unsigned int target_index,
+            const std::vector<ROOT::Math::XYZPoint>& source_positions)
             -> Eigen::Vector3d {
 
         const auto local_position =
@@ -1363,7 +1376,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 cur_pos
             );
 
-        auto raw_field =
+        const auto raw_field =
             detector_->getElectricField(
                 local_position
             );
@@ -1376,23 +1389,39 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         efield += coulomb_efield(
             evaluation_time,
-            local_position
+            local_position,
+            target_index,
+            source_positions
         );
-        auto doping = detector_->getDopingConcentration(static_cast<ROOT::Math::XYZPoint>(cur_pos));
 
-        return static_cast<int>(type) * mobility_(type, efield.norm(), doping) * efield;
+        const auto doping =
+            detector_->getDopingConcentration(
+                local_position
+            );
+
+        return static_cast<int>(type)
+            * mobility_(
+                type,
+                efield.norm(),
+                doping
+            )
+            * efield;
     };
 
     std::function<
         Eigen::Vector3d(
             double,
             const Eigen::Vector3d&,
-            allpix::CarrierType type
+            allpix::CarrierType,
+            unsigned int,
+            const std::vector<ROOT::Math::XYZPoint>&
         )
     > carrier_velocity_withB =
         [&](double evaluation_time,
             const Eigen::Vector3d& cur_pos,
-            allpix::CarrierType type)
+            allpix::CarrierType type,
+            unsigned int target_index,
+            const std::vector<ROOT::Math::XYZPoint>& source_positions)
             -> Eigen::Vector3d {
 
         const auto local_position =
@@ -1400,7 +1429,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 cur_pos
             );
 
-        auto raw_field =
+        const auto raw_field =
             detector_->getElectricField(
                 local_position
             );
@@ -1413,38 +1442,74 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         efield += coulomb_efield(
             evaluation_time,
-            local_position
+            local_position,
+            target_index,
+            source_positions
         );
 
-        Eigen::Vector3d velocity;
-
-        auto magnetic_field =
+        const auto magnetic_field =
             detector_->getMagneticField(
                 local_position
             );
 
-        Eigen::Vector3d bfield(
+        const Eigen::Vector3d bfield(
             magnetic_field.x(),
             magnetic_field.y(),
             magnetic_field.z()
         );
 
-        auto doping =
+        const auto doping =
             detector_->getDopingConcentration(
                 local_position
             );
 
-        auto mob = mobility_(type, efield.norm(), doping);
-        auto exb = efield.cross(bfield);
+        const auto mob =
+            mobility_(
+                type,
+                efield.norm(),
+                doping
+            );
 
-        Eigen::Vector3d term1;
-        double hallFactor = (type == CarrierType::ELECTRON ? electron_Hall_ : hole_Hall_);
-        term1 = static_cast<int>(type) * mob * hallFactor * exb;
+        const auto exb =
+            efield.cross(
+                bfield
+            );
 
-        Eigen::Vector3d term2 = mob * mob * hallFactor * hallFactor * efield.dot(bfield) * bfield;
+        const double hall_factor =
+            type == CarrierType::ELECTRON
+                ? electron_Hall_
+                : hole_Hall_;
 
-        auto rnorm = 1 + mob * mob * hallFactor * hallFactor * bfield.dot(bfield);
-        return static_cast<int>(type) * mob * (efield + term1 + term2) / rnorm;
+        const Eigen::Vector3d term1 =
+            static_cast<int>(type)
+            * mob
+            * hall_factor
+            * exb;
+
+        const Eigen::Vector3d term2 =
+            mob
+            * mob
+            * hall_factor
+            * hall_factor
+            * efield.dot(bfield)
+            * bfield;
+
+        const auto normalization =
+            1.0
+            + mob
+            * mob
+            * hall_factor
+            * hall_factor
+            * bfield.dot(bfield);
+
+        return static_cast<int>(type)
+            * mob
+            * (
+                efield
+                + term1
+                + term2
+            )
+            / normalization;
     };
 
     // Helper functions that convert between ROOT::Math:XYZPoint and Eigen::Vector3d (Eigen::Matrix<double, 3, 1>)
@@ -1466,42 +1531,108 @@ InteractivePropagationModule::propagate_together(Event* event,
     // Create list of RK4 objects that correspond to each particle
     std::vector<allpix::RungeKutta<double, 4, 3>> runge_kutta_vector;
 
-    // Initialize all of the vectors with their starting values from each charge group
-    for(auto charge : propagating_charges){
-        
-        // Specify the charge type before passing into the rungekutta 
-            // the rk step function can only have two arguments: t and pos
-        std::function<Eigen::Matrix<double, 3, 1>(double, Eigen::Matrix<double, 3, 1>)> step_function;
-        if (has_magnetic_field_){
-            step_function = [=](double t, Eigen::Vector3d pos) -> Eigen::Vector3d {return carrier_velocity_withB(t, pos, charge.getType());};
-        }else{
-            step_function = [=](double t, Eigen::Vector3d pos) -> Eigen::Vector3d {return carrier_velocity_noB(t, pos, charge.getType());};
+    // Initialize all vectors and the temporary independent RK4 objects.
+    //
+    // These RK4 objects still use the frozen beginning-of-step source state.
+    // This preserves the existing behaviour while preparing the field and
+    // velocity functions for the later globally coupled RK4 implementation.
+    for(unsigned int i = 0;
+        i < propagating_charges.size();
+        i++) {
+
+        const auto& charge =
+            propagating_charges[i];
+
+        const auto charge_type =
+            charge.getType();
+
+        std::function<
+            Eigen::Matrix<double, 3, 1>(
+                double,
+                Eigen::Matrix<double, 3, 1>
+            )
+        > step_function;
+
+        if(has_magnetic_field_) {
+            step_function =
+                [&, i, charge_type](
+                    double evaluation_time,
+                    Eigen::Vector3d trial_position
+                ) -> Eigen::Vector3d {
+
+                return carrier_velocity_withB(
+                    evaluation_time,
+                    trial_position,
+                    charge_type,
+                    i,
+                    previous_charge_locations
+                );
+            };
+        } else {
+            step_function =
+                [&, i, charge_type](
+                    double evaluation_time,
+                    Eigen::Vector3d trial_position
+                ) -> Eigen::Vector3d {
+
+                return carrier_velocity_noB(
+                    evaluation_time,
+                    trial_position,
+                    charge_type,
+                    i,
+                    previous_charge_locations
+                );
+            };
         }
 
-        auto rk = make_runge_kutta(
-            tableau::RK4, 
-            step_function,
-            timestep_, 
-            convertPointToVector(charge.getLocalPosition())); // No error estimation required since we're not adapting step size
+        auto rk =
+            make_runge_kutta(
+                tableau::RK4,
+                step_function,
+                timestep_,
+                convertPointToVector(
+                    charge.getLocalPosition()
+                )
+            );
 
-        // Set the start time of each to the local time of the charges deposition
-        rk.advanceTime(charge.getLocalTime());
-                                       
-        // Fill the vectors with their starting values for the current charge
-        runge_kutta_vector.push_back(rk);
-        std::map<Pixel::Index, Pulse> pixel_map; // Pixel map is required for pulse
-        pixel_map_vector.push_back(pixel_map);
-        charge_locations.push_back(charge.getLocalPosition());
-        previous_charge_locations.push_back(charge.getLocalPosition());
-        charge_times.push_back(charge.getLocalTime());
-        charge_states.push_back(charge.getState());
+        // Start propagation at the local deposition time.
+        rk.advanceTime(
+            charge.getLocalTime()
+        );
 
-        // Add point of deposition to the output plots if requested
+        runge_kutta_vector.push_back(
+            std::move(rk)
+        );
+
+        pixel_map_vector.emplace_back();
+
+        charge_locations.push_back(
+            charge.getLocalPosition()
+        );
+
+        previous_charge_locations.push_back(
+            charge.getLocalPosition()
+        );
+
+        charge_times.push_back(
+            charge.getLocalTime()
+        );
+
+        charge_states.push_back(
+            charge.getState()
+        );
+
         if(output_linegraphs_) {
-            output_plot_points.emplace_back(std::make_tuple(charge.getGlobalTime(), charge.getCharge(), charge.getType(), CarrierState::MOTION),
-                                            std::vector<ROOT::Math::XYZPoint>());
+            output_plot_points.emplace_back(
+                std::make_tuple(
+                    charge.getGlobalTime(),
+                    charge.getCharge(),
+                    charge.getType(),
+                    CarrierState::MOTION
+                ),
+                std::vector<ROOT::Math::XYZPoint>()
+            );
         }
-
     }
 
     if(propagating_charges.empty()) {
@@ -1832,7 +1963,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             charge = propagating_charges[i];
             previous_position = previous_charge_locations[i];
             type = charge.getType();
-            current_index = i; // Update for use in dynamic_field
+
 
             // Get electric field at current (pre-step) position
             // TODO: add a storage of the dynamic field so that we don't have to calculate it an extra time for use in diffusion
@@ -1848,7 +1979,9 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             efield += coulomb_efield(
                 pre_step_time,
-                position
+                position,
+                i,
+                previous_charge_locations
             );
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
 
