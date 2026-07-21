@@ -45,7 +45,7 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<double>("integration_time", Units::get(25, "ns"));
     config_.setDefault<unsigned int>("charge_per_step", 1);
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
-    config_.setDefault<double>("coulomb_distance_limit", Units::get(100,"um"));
+    config_.setDefault<double>("coulomb_distance_limit", Units::get(200.0,"um"));
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); 
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
