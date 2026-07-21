@@ -11,11 +11,14 @@
 
 #include "InteractivePropagationModule.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
-#include <limits>
+
 #include <Eigen/Core>
 
 #include "core/utils/distributions.h"
@@ -761,7 +764,6 @@ InteractivePropagationModule::propagate_together(Event* event,
     std::vector<double> charge_times; // Most recent time for all of the charges (by the end of propagation they should all be aligned)
     std::vector<allpix::CarrierState> charge_states; // The state of propagation of each charge group (whether it's propagated, trapped, or halted)
     double_t time = 0; // The current time threshold (we only propagate charges near this time)
-    int numSamePos = 0; // Counter for debugging the dynamic field collision detection
     unsigned int current_index = 0; // Used for ignoring the current charge from the Coulomb field
 
     // Temporary diagnostic counter:
@@ -770,6 +772,134 @@ InteractivePropagationModule::propagate_together(Event* event,
     // Temporary runtime diagnostics:
     bool coulomb_debug_first_pair_logged = false;
     bool coulomb_debug_first_cap_logged = false;
+
+    // Numerical separation used only when two distinct charge groups occupy
+    // exactly the same position. This preserves the previous regularization
+    // distance while making the field evaluation deterministic.
+    const double overlap_distance =
+        std::sqrt(1e-15); // Internal distance unit: mm
+
+    // SplitMix64 is used only to construct stable pair-dependent directions.
+    // It does not modify the event random-number engine.
+    const auto splitmix64 =
+        [](std::uint64_t value) -> std::uint64_t {
+            value += 0x9e3779b97f4a7c15ULL;
+            value =
+                (value ^ (value >> 30U))
+                * 0xbf58476d1ce4e5b9ULL;
+            value =
+                (value ^ (value >> 27U))
+                * 0x94d049bb133111ebULL;
+
+            return value ^ (value >> 31U);
+        };
+
+    // Return a deterministic target-minus-source separation vector for an
+    // exactly overlapping pair.
+    //
+    // The same unordered pair receives the same axis, while exchanging target
+    // and source reverses the vector. This preserves pairwise antisymmetry.
+    const auto deterministic_overlap_separation =
+        [&](unsigned int target_index,
+            unsigned int source_index)
+            -> ROOT::Math::XYZVector {
+
+        const auto lower_index =
+            std::min(
+                target_index,
+                source_index
+            );
+
+        const auto upper_index =
+            std::max(
+                target_index,
+                source_index
+            );
+
+        const auto lower_key =
+            static_cast<std::uint64_t>(
+                lower_index
+            );
+
+        const auto upper_key =
+            static_cast<std::uint64_t>(
+                upper_index
+            );
+
+        const auto event_key =
+            static_cast<std::uint64_t>(
+                event->number
+            );
+
+        std::uint64_t pair_key =
+            (lower_key << 32U)
+            | upper_key;
+
+        pair_key ^=
+            splitmix64(event_key);
+
+        const auto hash_1 =
+            splitmix64(pair_key);
+
+        const auto hash_2 =
+            splitmix64(hash_1);
+
+        // Convert the upper 53 bits to values in [0, 1).
+        constexpr double inverse_2_pow_53 =
+            1.0 / 9007199254740992.0;
+
+        const double uniform_1 =
+            static_cast<double>(
+                hash_1 >> 11U
+            )
+            * inverse_2_pow_53;
+
+        const double uniform_2 =
+            static_cast<double>(
+                hash_2 >> 11U
+            )
+            * inverse_2_pow_53;
+
+        // Uniform direction on the unit sphere:
+        // z is uniform in [-1, 1], while phi is uniform in [0, 2pi).
+        const double direction_z =
+            2.0 * uniform_1 - 1.0;
+
+        const double transverse_magnitude =
+            std::sqrt(
+                std::max(
+                    0.0,
+                    1.0
+                        - direction_z
+                        * direction_z
+                )
+            );
+
+        const double phi =
+            2.0
+            * ROOT::Math::Pi()
+            * uniform_2;
+
+        // target - source must reverse when target and source are exchanged.
+        const double orientation =
+            target_index < source_index
+                ? -1.0
+                : 1.0;
+
+        return ROOT::Math::XYZVector(
+            orientation
+                * overlap_distance
+                * transverse_magnitude
+                * std::cos(phi),
+            orientation
+                * overlap_distance
+                * transverse_magnitude
+                * std::sin(phi),
+            orientation
+                * overlap_distance
+                * direction_z
+        );
+    };
 
     // Computes the coulomb force component of the e-field given a desired local point
     auto coulomb_efield =[&](double evaluation_time, ROOT::Math::XYZPoint point) -> Eigen::Vector3d {
@@ -859,22 +989,18 @@ InteractivePropagationModule::propagate_together(Event* event,
                 continue;
             }
 
-            // Handling of overlapping charges (that aren't the charge we are calculating for)
-            local_position = previous_charge_locations[i];
-            if (local_position == point && current_index != i){
+            // Detect an exact overlap between two distinct charge groups.
+            // Do not modify the physical source position here: mirror-charge
+            // calculations should continue to use the actual source position.
+            local_position =
+                previous_charge_locations[i];
 
+            const bool source_overlaps_target =
+                current_index != i
+                && local_position == point;
+
+            if(source_overlaps_target) {
                 debug_sources_overlapping++;
-                numSamePos += 1;
-                
-                // Give the overlapping charge a random directional offset so the field at point is in a random direction
-                auto phi = uniform_distribution(event->getRandomEngine()) * 2 * ROOT::Math::Pi();
-                auto theta = uniform_distribution(event->getRandomEngine()) * ROOT::Math::Pi();
-                auto r = ROOT::Math::sqrt(1e-15); // A very small value as to always hit the electric field limit
-                auto x = r * ROOT::Math::cos(theta) * ROOT::Math::cos(phi);
-                auto y = r * ROOT::Math::cos(theta) * ROOT::Math::sin(phi);
-                auto z = r * ROOT::Math::sin(theta);
-                local_position = ROOT::Math::XYZPoint(local_position.x() + x, local_position.y() + y, local_position.z() + z);
-                // point = ROOT::Math::XYZPoint(point.x() + x, point.y() + y, point.z() + z);
             }
 
             // Get the correct signed charge
@@ -887,8 +1013,16 @@ InteractivePropagationModule::propagate_together(Event* event,
                 debug_sources_self++;
             } else {
 
-                dist_vector =
-                    point - local_position;
+                if(source_overlaps_target) {
+                    dist_vector =
+                        deterministic_overlap_separation(
+                            current_index,
+                            i
+                        );
+                } else {
+                    dist_vector =
+                        point - local_position;
+                }
 
                 dist_mag2 =
                     dist_vector.Mag2();
@@ -1163,11 +1297,38 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << debug_sources_outside_cutoff
                 << "\n  eligible direct interactions = "
                 << debug_sources_eligible
+                << "\n  resulting field vector, internal = ("
+                << field.x()
+                << ", "
+                << field.y()
+                << ", "
+                << field.z()
+                << ")"
+                << "\n  resulting field vector in V/cm = ("
+                << Units::convert(
+                    field.x(),
+                    "V/cm"
+                )
+                << ", "
+                << Units::convert(
+                    field.y(),
+                    "V/cm"
+                )
+                << ", "
+                << Units::convert(
+                    field.z(),
+                    "V/cm"
+                )
+                << ")"
                 << "\n  resulting total field, internal = "
-                << std::sqrt(field.Mag2())
+                << std::sqrt(
+                    field.Mag2()
+                )
                 << "\n  resulting total field = "
                 << Units::convert(
-                    std::sqrt(field.Mag2()),
+                    std::sqrt(
+                        field.Mag2()
+                    ),
                     "V/cm"
                 )
                 << " V/cm";
