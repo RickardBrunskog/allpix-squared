@@ -772,7 +772,7 @@ InteractivePropagationModule::propagate_together(Event* event,
     bool coulomb_debug_first_cap_logged = false;
 
     // Computes the coulomb force component of the e-field given a desired local point
-    auto coulomb_efield = [&](ROOT::Math::XYZPoint point) -> Eigen::Vector3d {
+    auto coulomb_efield =[&](double evaluation_time, ROOT::Math::XYZPoint point) -> Eigen::Vector3d {
 
         
         const bool debug_this_call =
@@ -841,7 +841,10 @@ InteractivePropagationModule::propagate_together(Event* event,
             // }
             debug_sources_total++;
 
-            if(propagating_charges[i].getLocalTime() > time) {
+            if(
+                propagating_charges[i].getLocalTime()
+                > evaluation_time
+            ) {
                 debug_sources_future++;
                 continue;
             }
@@ -921,8 +924,17 @@ InteractivePropagationModule::propagate_together(Event* event,
                             << "[COULOMB_DEBUG_PAIR]"
                             << "\n  call number = "
                             << coulomb_debug_call_count
-                            << "\n  propagation time = "
-                            << Units::convert(time, "ns")
+                            << "\n  field evaluation time = "
+                            << Units::convert(
+                                evaluation_time,
+                                "ns"
+                            )
+                            << " ns"
+                            << "\n  outer timestep start = "
+                            << Units::convert(
+                                time,
+                                "ns"
+                            )
                             << " ns"
                             << "\n  source group index = "
                             << i
@@ -1096,8 +1108,24 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << "[COULOMB_DEBUG_CALL]"
                 << "\n  call number = "
                 << coulomb_debug_call_count
-                << "\n  propagation time = "
-                << Units::convert(time, "ns")
+                << "\n  field evaluation time = "
+                << Units::convert(
+                    evaluation_time,
+                    "ns"
+                )
+                << " ns"
+                << "\n  outer timestep start = "
+                << Units::convert(
+                    time,
+                    "ns"
+                )
+                << " ns"
+                << "\n  target deposition time = "
+                << Units::convert(
+                    propagating_charges[current_index]
+                        .getLocalTime(),
+                    "ns"
+                )
                 << " ns"
                 << "\n  target group index = "
                 << current_index
@@ -1157,30 +1185,93 @@ InteractivePropagationModule::propagate_together(Event* event,
     };
 
     // Define lambda functions to compute the charge carrier velocity with or without magnetic field
-    std::function<Eigen::Vector3d(double, const Eigen::Vector3d&, allpix::CarrierType type)> carrier_velocity_noB =
-        [&](double, const Eigen::Vector3d& cur_pos, allpix::CarrierType type) -> Eigen::Vector3d {
-        auto raw_field = detector_->getElectricField(static_cast<ROOT::Math::XYZPoint>(cur_pos));
-        Eigen::Vector3d efield(raw_field.x(), raw_field.y(), raw_field.z());
+    std::function<
+        Eigen::Vector3d(
+            double,
+            const Eigen::Vector3d&,
+            allpix::CarrierType type
+        )
+    > carrier_velocity_noB =
+        [&](double evaluation_time,
+            const Eigen::Vector3d& cur_pos,
+            allpix::CarrierType type)
+            -> Eigen::Vector3d {
 
-        efield = efield + coulomb_efield(static_cast<ROOT::Math::XYZPoint>(cur_pos)); // Includes the dynamic field from charge interaction
+        const auto local_position =
+            static_cast<ROOT::Math::XYZPoint>(
+                cur_pos
+            );
 
+        auto raw_field =
+            detector_->getElectricField(
+                local_position
+            );
+
+        Eigen::Vector3d efield(
+            raw_field.x(),
+            raw_field.y(),
+            raw_field.z()
+        );
+
+        efield += coulomb_efield(
+            evaluation_time,
+            local_position
+        );
         auto doping = detector_->getDopingConcentration(static_cast<ROOT::Math::XYZPoint>(cur_pos));
 
         return static_cast<int>(type) * mobility_(type, efield.norm(), doping) * efield;
     };
 
-    std::function<Eigen::Vector3d(double, const Eigen::Vector3d&, allpix::CarrierType type)> carrier_velocity_withB =
-        [&](double, const Eigen::Vector3d& cur_pos, allpix::CarrierType type) -> Eigen::Vector3d {
-        auto raw_field = detector_->getElectricField(static_cast<ROOT::Math::XYZPoint>(cur_pos));
-        Eigen::Vector3d efield(raw_field.x(), raw_field.y(), raw_field.z()); 
+    std::function<
+        Eigen::Vector3d(
+            double,
+            const Eigen::Vector3d&,
+            allpix::CarrierType type
+        )
+    > carrier_velocity_withB =
+        [&](double evaluation_time,
+            const Eigen::Vector3d& cur_pos,
+            allpix::CarrierType type)
+            -> Eigen::Vector3d {
 
-        efield = efield + coulomb_efield(static_cast<ROOT::Math::XYZPoint>(cur_pos)); // Includes the dynamic field from charge interaction
+        const auto local_position =
+            static_cast<ROOT::Math::XYZPoint>(
+                cur_pos
+            );
+
+        auto raw_field =
+            detector_->getElectricField(
+                local_position
+            );
+
+        Eigen::Vector3d efield(
+            raw_field.x(),
+            raw_field.y(),
+            raw_field.z()
+        );
+
+        efield += coulomb_efield(
+            evaluation_time,
+            local_position
+        );
 
         Eigen::Vector3d velocity;
-        auto magnetic_field = detector_->getMagneticField(static_cast<ROOT::Math::XYZPoint>(cur_pos));
-        Eigen::Vector3d bfield(magnetic_field.x(), magnetic_field.y(), magnetic_field.z());
 
-        auto doping = detector_->getDopingConcentration(static_cast<ROOT::Math::XYZPoint>(cur_pos));
+        auto magnetic_field =
+            detector_->getMagneticField(
+                local_position
+            );
+
+        Eigen::Vector3d bfield(
+            magnetic_field.x(),
+            magnetic_field.y(),
+            magnetic_field.z()
+        );
+
+        auto doping =
+            detector_->getDopingConcentration(
+                local_position
+            );
 
         auto mob = mobility_(type, efield.norm(), doping);
         auto exb = efield.cross(bfield);
@@ -1584,8 +1675,20 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Get electric field at current (pre-step) position
             // TODO: add a storage of the dynamic field so that we don't have to calculate it an extra time for use in diffusion
-            efield = convertRootVectorToEigenVector(detector_->getElectricField(position));
-            efield += coulomb_efield(position);
+            const double pre_step_time =
+                runge_kutta.getTime();
+
+            efield =
+                convertRootVectorToEigenVector(
+                    detector_->getElectricField(
+                        position
+                    )
+                );
+
+            efield += coulomb_efield(
+                pre_step_time,
+                position
+            );
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
 
             // Execute a Runge Kutta step and update time in the vector
