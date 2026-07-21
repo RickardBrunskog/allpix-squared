@@ -124,7 +124,7 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     }
     
     coulomb_distance_limit_squared_ = config.get<double>("coulomb_distance_limit") * config.get<double>("coulomb_distance_limit") * 1e2; // cm^2 -> mm^2
-    coulomb_field_limit_ = config.get<double>("coulomb_field_limit") * 1e-5; // Convert from V/cm to MV/mm (internal field units)
+    // coulomb_field_limit_ = config.get<double>("coulomb_field_limit") * 1e-5; // Convert from V/cm to MV/mm (internal field units)
 
     // Store the coulomb_field_limit_ 
 
@@ -646,7 +646,35 @@ void InteractivePropagationModule::run(Event* event) {
     }
     
     LOG(INFO) << "Average number of charges per group is " << total_deposited_charge/propagating_charges.size() << " ("<< propagating_charges.size() <<" total)";
-    
+    LOG(WARNING)
+        << "[COULOMB_DEBUG_EVENT]"
+        << "\n  event number = "
+        << event->number
+        << "\n  total deposited charge = "
+        << total_deposited_charge
+        << " e"
+        << "\n  charge_per_step configured = "
+        << charge_per_step_
+        << "\n  charge_per_step actually used = "
+        << charge_per_step
+        << "\n  max_charge_groups = "
+        << max_charge_groups_
+        << "\n  number of propagating groups = "
+        << propagating_charges.size()
+        << "\n  Coulomb enabled = "
+        << enable_coulomb_repulsion_
+        << "\n  distance cutoff, internal = "
+        << std::sqrt(
+            coulomb_distance_limit_squared_
+        )
+        << "\n  distance cutoff = "
+        << Units::convert(
+            std::sqrt(
+                coulomb_distance_limit_squared_
+            ),
+            "um"
+        )
+        << " um";
     // Propagation occurs within the following function call
     auto [recombined_charges_count, trapped_charges_count, propagated_charges_count] = propagate_together(event, propagating_charges, propagated_charges, propagation_summaries, output_plot_points);
 
@@ -734,12 +762,30 @@ InteractivePropagationModule::propagate_together(Event* event,
     int numSamePos = 0; // Counter for debugging the dynamic field collision detection
     unsigned int current_index = 0; // Used for ignoring the current charge from the Coulomb field
 
+    // Temporary diagnostic counter:
+    unsigned int coulomb_debug_call_count = 0; // Checking the calls
+
     // Temporary runtime diagnostics:
     bool coulomb_debug_first_pair_logged = false;
     bool coulomb_debug_first_cap_logged = false;
 
     // Computes the coulomb force component of the e-field given a desired local point
     auto coulomb_efield = [&](ROOT::Math::XYZPoint point) -> Eigen::Vector3d {
+
+        
+        const bool debug_this_call =
+            coulomb_debug_call_count < 20;
+
+        unsigned int debug_sources_total = 0;
+        unsigned int debug_sources_future = 0;
+        unsigned int debug_sources_halted = 0;
+        unsigned int debug_sources_recombined = 0;
+        unsigned int debug_sources_self = 0;
+        unsigned int debug_sources_zero_distance = 0;
+        unsigned int debug_sources_outside_cutoff = 0;
+        unsigned int debug_sources_eligible = 0;
+        unsigned int debug_sources_overlapping = 0;
+
 
         auto coulomb_start = std::chrono::system_clock::now();
 
@@ -755,8 +801,25 @@ InteractivePropagationModule::propagate_together(Event* event,
         double interaction_magnitude;
 
         // Skip function entirely if disabled by configuration file
-        if (!enable_coulomb_repulsion_){
-            return Eigen::Vector3d(field.x(),field.y(),field.z());
+        // if (!enable_coulomb_repulsion_){
+        //     return Eigen::Vector3d(field.x(),field.y(),field.z());
+        // }
+        if(!enable_coulomb_repulsion_) {
+            if(debug_this_call) {
+                LOG(WARNING)
+                    << "[COULOMB_DEBUG_CALL]"
+                    << "\n  call number = "
+                    << coulomb_debug_call_count
+                    << "\n  Coulomb repulsion is disabled";
+            }
+
+            coulomb_debug_call_count++;
+
+            return Eigen::Vector3d(
+                field.x(),
+                field.y(),
+                field.z()
+            );
         }
 
         if(previous_charge_locations.size() != propagating_charges.size() ||
@@ -771,7 +834,23 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Only get fields from charges that have deposition time less than the current time (skip the ones that haven't been deposited yet)
             // This means that trapped charges at future times are okay, but not charges that haven't been deposited yet
             // Charges that have reached the sensor (HALTED) are assumed to be swept away and don't contribute to the coulomb field either
-            if (propagating_charges[i].getLocalTime() > time || charge_states[i] == allpix::CarrierState::HALTED || charge_states[i] == allpix::CarrierState::RECOMBINED){
+            // if (propagating_charges[i].getLocalTime() > time || charge_states[i] == allpix::CarrierState::HALTED || charge_states[i] == allpix::CarrierState::RECOMBINED){
+            //     continue;
+            // }
+            debug_sources_total++;
+
+            if(propagating_charges[i].getLocalTime() > time) {
+                debug_sources_future++;
+                continue;
+            }
+
+            if(charge_states[i] == CarrierState::HALTED) {
+                debug_sources_halted++;
+                continue;
+            }
+
+            if(charge_states[i] == CarrierState::RECOMBINED) {
+                debug_sources_recombined++;
                 continue;
             }
 
@@ -779,6 +858,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             local_position = previous_charge_locations[i];
             if (local_position == point && current_index != i){
 
+                debug_sources_overlapping++;
                 numSamePos += 1;
                 
                 // Give the overlapping charge a random directional offset so the field at point is in a random direction
@@ -798,13 +878,29 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Calculate the coulomb field due to charges that aren't the current charge
                 // The calculation needs to be in the if-statement rather than a terminiation/continue since we still want to include the mirror charges of the current charge
-            if (current_index != i){
-            
-                dist_vector = point - local_position; // A vector between the desired points (mm)
-                dist_mag2 =  dist_vector.Mag2();
+            if(current_index == i) {
+                debug_sources_self++;
+            } else {
 
-                if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
-                    dist_mag = ROOT::Math::sqrt(dist_mag2);
+                dist_vector =
+                    point - local_position;
+
+                dist_mag2 =
+                    dist_vector.Mag2();
+
+                if(dist_mag2 <= 0.0) {
+                    debug_sources_zero_distance++;
+                } else if(
+                    dist_mag2
+                    >= coulomb_distance_limit_squared_
+                ) {
+                    debug_sources_outside_cutoff++;
+                } else {
+
+                    debug_sources_eligible++;
+
+                    dist_mag =
+                        ROOT::Math::sqrt(dist_mag2);
 
                     const auto uncapped_interaction_magnitude =
                         coulomb_K_
@@ -812,13 +908,143 @@ InteractivePropagationModule::propagate_together(Event* event,
                         * static_cast<double>(q)
                         / dist_mag2;
 
+                    interaction_magnitude =
+                        std::min(
+                            coulomb_field_limit_,
+                            uncapped_interaction_magnitude
+                        );
 
-                    interaction_magnitude = std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
-                    if(output_plots_ && std::isfinite(interaction_magnitude) && interaction_magnitude >= 0.0) {
-                        coulomb_mag_histo_->Fill(interaction_magnitude * 1e5);
+                    if(!coulomb_debug_first_pair_logged) {
+                        LOG(WARNING)
+                            << "[COULOMB_DEBUG_PAIR]"
+                            << "\n  call number = "
+                            << coulomb_debug_call_count
+                            << "\n  propagation time = "
+                            << Units::convert(time, "ns")
+                            << " ns"
+                            << "\n  source group index = "
+                            << i
+                            << "\n  target group index = "
+                            << current_index
+                            << "\n  source charge = "
+                            << q
+                            << " e"
+                            << "\n  separation = "
+                            << Units::convert(
+                                dist_mag,
+                                "um"
+                            )
+                            << " um"
+                            << "\n  separation squared = "
+                            << dist_mag2
+                            << " mm^2"
+                            << "\n  cutoff = "
+                            << Units::convert(
+                                std::sqrt(
+                                    coulomb_distance_limit_squared_
+                                ),
+                                "um"
+                            )
+                            << " um"
+                            << "\n  relative permittivity = "
+                            << relative_permittivity_
+                            << "\n  uncapped field, internal = "
+                            << uncapped_interaction_magnitude
+                            << "\n  uncapped field = "
+                            << Units::convert(
+                                uncapped_interaction_magnitude,
+                                "V/cm"
+                            )
+                            << " V/cm"
+                            << "\n  stored cap, internal = "
+                            << coulomb_field_limit_
+                            << "\n  stored cap = "
+                            << Units::convert(
+                                coulomb_field_limit_,
+                                "V/cm"
+                            )
+                            << " V/cm"
+                            << "\n  field used, internal = "
+                            << interaction_magnitude
+                            << "\n  field used = "
+                            << Units::convert(
+                                interaction_magnitude,
+                                "V/cm"
+                            )
+                            << " V/cm"
+                            << "\n  cap applied = "
+                            << (
+                                uncapped_interaction_magnitude
+                                    > coulomb_field_limit_
+                                ? "YES"
+                                : "NO"
+                            );
+
+                        coulomb_debug_first_pair_logged = true;
                     }
 
-                    field = field + dist_vector / dist_mag * sign * interaction_magnitude;
+                    if(
+                        !coulomb_debug_first_cap_logged
+                        && uncapped_interaction_magnitude
+                        > coulomb_field_limit_
+                    ) {
+                        LOG(WARNING)
+                            << "[COULOMB_DEBUG_CAP]"
+                            << "\n  call number = "
+                            << coulomb_debug_call_count
+                            << "\n  source group index = "
+                            << i
+                            << "\n  target group index = "
+                            << current_index
+                            << "\n  separation = "
+                            << Units::convert(
+                                dist_mag,
+                                "um"
+                            )
+                            << " um"
+                            << "\n  source charge = "
+                            << q
+                            << " e"
+                            << "\n  uncapped field = "
+                            << Units::convert(
+                                uncapped_interaction_magnitude,
+                                "V/cm"
+                            )
+                            << " V/cm"
+                            << "\n  cap = "
+                            << Units::convert(
+                                coulomb_field_limit_,
+                                "V/cm"
+                            )
+                            << " V/cm"
+                            << "\n  field used = "
+                            << Units::convert(
+                                interaction_magnitude,
+                                "V/cm"
+                            )
+                            << " V/cm";
+
+                        coulomb_debug_first_cap_logged = true;
+                    }
+
+                    if(
+                        output_plots_
+                        && std::isfinite(
+                            interaction_magnitude
+                        )
+                        && interaction_magnitude >= 0.0
+                    ) {
+                        coulomb_mag_histo_->Fill(
+                            interaction_magnitude * 1e5
+                        );
+                    }
+
+                    field =
+                        field
+                        + dist_vector
+                            / dist_mag
+                            * sign
+                            * interaction_magnitude;
                 }
             }
 
@@ -862,6 +1088,62 @@ InteractivePropagationModule::propagate_together(Event* event,
             //     // LOG(INFO) << "   now " << field.mag2();
             //     numSamePos+=1;
             // }
+
+        if(debug_this_call) {
+            LOG(WARNING)
+                << "[COULOMB_DEBUG_CALL]"
+                << "\n  call number = "
+                << coulomb_debug_call_count
+                << "\n  propagation time = "
+                << Units::convert(time, "ns")
+                << " ns"
+                << "\n  target group index = "
+                << current_index
+                << "\n  number of propagating groups = "
+                << propagating_charges.size()
+                << "\n  Coulomb enabled = "
+                << enable_coulomb_repulsion_
+                << "\n  cutoff, internal = "
+                << std::sqrt(
+                    coulomb_distance_limit_squared_
+                )
+                << "\n  cutoff = "
+                << Units::convert(
+                    std::sqrt(
+                        coulomb_distance_limit_squared_
+                    ),
+                    "um"
+                )
+                << " um"
+                << "\n  sources inspected = "
+                << debug_sources_total
+                << "\n  skipped: future deposition = "
+                << debug_sources_future
+                << "\n  skipped: halted = "
+                << debug_sources_halted
+                << "\n  skipped: recombined = "
+                << debug_sources_recombined
+                << "\n  skipped: target self = "
+                << debug_sources_self
+                << "\n  exact zero distance = "
+                << debug_sources_zero_distance
+                << "\n  overlapping and offset = "
+                << debug_sources_overlapping
+                << "\n  outside cutoff = "
+                << debug_sources_outside_cutoff
+                << "\n  eligible direct interactions = "
+                << debug_sources_eligible
+                << "\n  resulting total field, internal = "
+                << field.Mag()
+                << "\n  resulting total field = "
+                << Units::convert(
+                    field.Mag(),
+                    "V/cm"
+                )
+                << " V/cm";
+        }
+
+        coulomb_debug_call_count++;
 
         Eigen::Vector3d output = Eigen::Vector3d(field.x(),field.y(),field.z());
 
