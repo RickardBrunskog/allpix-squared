@@ -1134,10 +1134,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << "\n  eligible direct interactions = "
                 << debug_sources_eligible
                 << "\n  resulting total field, internal = "
-                << field.Mag()
+                << std::sqrt(field.Mag2())
                 << "\n  resulting total field = "
                 << Units::convert(
-                    field.Mag(),
+                    std::sqrt(field.Mag2()),
                     "V/cm"
                 )
                 << " V/cm";
