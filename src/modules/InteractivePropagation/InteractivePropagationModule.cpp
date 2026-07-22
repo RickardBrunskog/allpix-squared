@@ -2617,6 +2617,390 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 )
                                 : 0.0;
 
+                    // Evaluate one velocity for a target using a common
+                    // stage-wide source-position array.
+                    const auto evaluate_common_stage_velocity =
+                        [&](double stage_time,
+                            unsigned int target_index,
+                            const std::vector<
+                                ROOT::Math::XYZPoint
+                            >& stage_positions)
+                            -> Eigen::Vector3d {
+
+                        const auto trial_position =
+                            convertPointToVector(
+                                stage_positions[
+                                    target_index
+                                ]
+                            );
+
+                        const auto target_type =
+                            propagating_charges[
+                                target_index
+                            ].getType();
+
+                        if(has_magnetic_field_) {
+                            return carrier_velocity_withB(
+                                stage_time,
+                                trial_position,
+                                target_type,
+                                target_index,
+                                stage_positions,
+                                previous_charge_states,
+                                substep_source_active,
+                                SourceActivationMode::
+                                    EXPLICIT_MASK,
+                                false
+                            );
+                        }
+
+                        return carrier_velocity_noB(
+                            stage_time,
+                            trial_position,
+                            target_type,
+                            target_index,
+                            stage_positions,
+                            previous_charge_states,
+                            substep_source_active,
+                            SourceActivationMode::
+                                EXPLICIT_MASK,
+                            false
+                        );
+                    };
+
+                    std::vector<Eigen::Vector3d>
+                        shadow_k2(
+                            propagating_charges.size(),
+                            Eigen::Vector3d::Zero()
+                        );
+
+                    std::vector<Eigen::Vector3d>
+                        shadow_k3(
+                            propagating_charges.size(),
+                            Eigen::Vector3d::Zero()
+                        );
+
+                    std::vector<Eigen::Vector3d>
+                        shadow_k4(
+                            propagating_charges.size(),
+                            Eigen::Vector3d::Zero()
+                        );
+
+                    std::vector<ROOT::Math::XYZPoint>
+                        shadow_stage3_positions =
+                            previous_charge_locations;
+
+                    std::vector<ROOT::Math::XYZPoint>
+                        shadow_stage4_positions =
+                            previous_charge_locations;
+
+                    std::vector<ROOT::Math::XYZPoint>
+                        shadow_final_positions =
+                            previous_charge_locations;
+
+                    const double shadow_midpoint_time =
+                        substep_start
+                        + 0.5 * substep_size;
+
+                    // Common K2 and K3 trial positions.
+                    for(unsigned int source_index = 0;
+                        source_index
+                            < propagating_charges.size();
+                        source_index++) {
+
+                        if(
+                            substep_source_active[
+                                source_index
+                            ] == 0U
+                            || previous_charge_states[
+                                source_index
+                            ] != CarrierState::MOTION
+                        ) {
+                            continue;
+                        }
+
+                        shadow_k2[source_index] =
+                            evaluate_common_stage_velocity(
+                                shadow_midpoint_time,
+                                source_index,
+                                shadow_stage2_positions
+                            );
+
+                        const auto initial_position =
+                            convertPointToVector(
+                                previous_charge_locations[
+                                    source_index
+                                ]
+                            );
+
+                        shadow_stage3_positions[
+                            source_index
+                        ] =
+                            convertVectorToPoint(
+                                initial_position
+                                + 0.5
+                                    * substep_size
+                                    * shadow_k2[
+                                        source_index
+                                    ]
+                            );
+                    }
+
+                    // Common K3 and K4 trial positions.
+                    for(unsigned int source_index = 0;
+                        source_index
+                            < propagating_charges.size();
+                        source_index++) {
+
+                        if(
+                            substep_source_active[
+                                source_index
+                            ] == 0U
+                            || previous_charge_states[
+                                source_index
+                            ] != CarrierState::MOTION
+                        ) {
+                            continue;
+                        }
+
+                        shadow_k3[source_index] =
+                            evaluate_common_stage_velocity(
+                                shadow_midpoint_time,
+                                source_index,
+                                shadow_stage3_positions
+                            );
+
+                        const auto initial_position =
+                            convertPointToVector(
+                                previous_charge_locations[
+                                    source_index
+                                ]
+                            );
+
+                        shadow_stage4_positions[
+                            source_index
+                        ] =
+                            convertVectorToPoint(
+                                initial_position
+                                + substep_size
+                                    * shadow_k3[
+                                        source_index
+                                    ]
+                            );
+                    }
+
+                    // Common K4 and simultaneous final update.
+                    for(unsigned int source_index = 0;
+                        source_index
+                            < propagating_charges.size();
+                        source_index++) {
+
+                        if(
+                            substep_source_active[
+                                source_index
+                            ] == 0U
+                            || previous_charge_states[
+                                source_index
+                            ] != CarrierState::MOTION
+                        ) {
+                            continue;
+                        }
+
+                        shadow_k4[source_index] =
+                            evaluate_common_stage_velocity(
+                                substep_end,
+                                source_index,
+                                shadow_stage4_positions
+                            );
+
+                        const auto initial_position =
+                            convertPointToVector(
+                                previous_charge_locations[
+                                    source_index
+                                ]
+                            );
+
+                        shadow_final_positions[
+                            source_index
+                        ] =
+                            convertVectorToPoint(
+                                initial_position
+                                + substep_size
+                                    / 6.0
+                                    * (
+                                        shadow_k1[
+                                            source_index
+                                        ]
+                                        + 2.0
+                                            * shadow_k2[
+                                                source_index
+                                            ]
+                                        + 2.0
+                                            * shadow_k3[
+                                                source_index
+                                            ]
+                                        + shadow_k4[
+                                            source_index
+                                        ]
+                                    )
+                            );
+                    }
+
+                                        const auto diagnostic_target_initial_position =
+                        convertPointToVector(
+                            previous_charge_locations[
+                                diagnostic_target_index
+                            ]
+                        );
+
+                    const auto diagnostic_target_type =
+                        propagating_charges[
+                            diagnostic_target_index
+                        ].getType();
+
+                    const auto evaluate_frozen_target_velocity =
+                        [&](double stage_time,
+                            const Eigen::Vector3d&
+                                trial_position)
+                            -> Eigen::Vector3d {
+
+                        if(has_magnetic_field_) {
+                            return carrier_velocity_withB(
+                                stage_time,
+                                trial_position,
+                                diagnostic_target_type,
+                                diagnostic_target_index,
+                                previous_charge_locations,
+                                previous_charge_states,
+                                substep_source_active,
+                                SourceActivationMode::
+                                    EXPLICIT_MASK,
+                                false
+                            );
+                        }
+
+                        return carrier_velocity_noB(
+                            stage_time,
+                            trial_position,
+                            diagnostic_target_type,
+                            diagnostic_target_index,
+                            previous_charge_locations,
+                            previous_charge_states,
+                            substep_source_active,
+                            SourceActivationMode::
+                                EXPLICIT_MASK,
+                            false
+                        );
+                    };
+
+                    // K1 is identical for the common-stage and
+                    // frozen-source calculations because both begin from
+                    // the same source-position state.
+                    const auto frozen_target_k1 =
+                        shadow_k1[
+                            diagnostic_target_index
+                        ];
+
+                    const auto frozen_target_k2 =
+                        evaluate_frozen_target_velocity(
+                            shadow_midpoint_time,
+                            diagnostic_target_initial_position
+                            + 0.5
+                                * substep_size
+                                * frozen_target_k1
+                        );
+
+                    const auto frozen_target_k3 =
+                        evaluate_frozen_target_velocity(
+                            shadow_midpoint_time,
+                            diagnostic_target_initial_position
+                            + 0.5
+                                * substep_size
+                                * frozen_target_k2
+                        );
+
+                    const auto frozen_target_k4 =
+                        evaluate_frozen_target_velocity(
+                            substep_end,
+                            diagnostic_target_initial_position
+                            + substep_size
+                                * frozen_target_k3
+                        );
+
+                    const auto frozen_target_final_position =
+                        diagnostic_target_initial_position
+                        + substep_size
+                            / 6.0
+                            * (
+                                frozen_target_k1
+                                + 2.0
+                                    * frozen_target_k2
+                                + 2.0
+                                    * frozen_target_k3
+                                + frozen_target_k4
+                            );
+
+                    const auto coupled_target_final_position =
+                        convertPointToVector(
+                            shadow_final_positions[
+                                diagnostic_target_index
+                            ]
+                        );
+
+                    const auto frozen_target_displacement =
+                        frozen_target_final_position
+                        - diagnostic_target_initial_position;
+
+                    const auto coupled_target_displacement =
+                        coupled_target_final_position
+                        - diagnostic_target_initial_position;
+
+                    const auto coupled_minus_frozen_position =
+                        coupled_target_final_position
+                        - frozen_target_final_position;
+
+                    unsigned int
+                        shadow_nonfinite_group_count = 0;
+
+                    for(unsigned int source_index = 0;
+                        source_index
+                            < propagating_charges.size();
+                        source_index++) {
+
+                        if(
+                            substep_source_active[
+                                source_index
+                            ] == 0U
+                            || previous_charge_states[
+                                source_index
+                            ] != CarrierState::MOTION
+                        ) {
+                            continue;
+                        }
+
+                        if(
+                            !shadow_k1[
+                                source_index
+                            ].allFinite()
+                            || !shadow_k2[
+                                source_index
+                            ].allFinite()
+                            || !shadow_k3[
+                                source_index
+                            ].allFinite()
+                            || !shadow_k4[
+                                source_index
+                            ].allFinite()
+                            || !convertPointToVector(
+                                shadow_final_positions[
+                                    source_index
+                                ]
+                            ).allFinite()
+                        ) {
+                            shadow_nonfinite_group_count++;
+                        }
+                    }
+
                     const auto&
                         diagnostic_target_stage2_position =
                             shadow_stage2_positions[
@@ -2723,6 +3107,97 @@ InteractivePropagationModule::propagate_together(Event* event,
                             "V/cm"
                         )
                         << " V/cm";
+
+                                        LOG(WARNING)
+                        << "[COUPLED_RK4_FULL_SHADOW_CHECK]"
+                        << "\n  substep index = "
+                        << substep_index
+                        << "\n  substep start = "
+                        << std::setprecision(
+                            std::numeric_limits<double>::
+                                max_digits10
+                        )
+                        << Units::convert(
+                            substep_start,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  substep end = "
+                        << Units::convert(
+                            substep_end,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  active moving groups = "
+                        << shadow_active_moving_groups
+                        << "\n  groups with non-finite shadow values = "
+                        << shadow_nonfinite_group_count
+                        << "\n  target frozen-source displacement = ("
+                        << Units::convert(
+                            frozen_target_displacement.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            frozen_target_displacement.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            frozen_target_displacement.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  target coupled displacement = ("
+                        << Units::convert(
+                            coupled_target_displacement.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            coupled_target_displacement.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            coupled_target_displacement.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  target frozen-source displacement magnitude = "
+                        << Units::convert(
+                            frozen_target_displacement.norm(),
+                            "um"
+                        )
+                        << " um"
+                        << "\n  target coupled displacement magnitude = "
+                        << Units::convert(
+                            coupled_target_displacement.norm(),
+                            "um"
+                        )
+                        << " um"
+                        << "\n  coupled-minus-frozen position = ("
+                        << Units::convert(
+                            coupled_minus_frozen_position.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            coupled_minus_frozen_position.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            coupled_minus_frozen_position.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  coupled-minus-frozen position magnitude = "
+                        << Units::convert(
+                            coupled_minus_frozen_position.norm(),
+                            "um"
+                        )
+                        << " um";
                 }
             }
         }
