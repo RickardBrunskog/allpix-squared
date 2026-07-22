@@ -2461,6 +2461,269 @@ InteractivePropagationModule::propagate_together(Event* event,
                         )
                         << " V/cm";
                 }
+
+                // Construct one diagnostic common K2 source state for the
+                // final activation substep. This remains a shadow calculation:
+                // no physical positions, states, RK objects, pulses, or random
+                // numbers are modified.
+                if(
+                    substep_index + 2
+                    == merged_boundaries.size()
+                ) {
+
+                    constexpr unsigned int
+                        diagnostic_target_index = 0U;
+
+                    if(
+                        substep_source_active[
+                            diagnostic_target_index
+                        ] == 0U
+                        || previous_charge_states[
+                            diagnostic_target_index
+                        ] != CarrierState::MOTION
+                    ) {
+                        throw ModuleError(
+                            "Diagnostic coupled RK4 target is not active "
+                            "and moving in the final activation substep"
+                        );
+                    }
+
+                    std::vector<Eigen::Vector3d>
+                        shadow_k1(
+                            propagating_charges.size(),
+                            Eigen::Vector3d::Zero()
+                        );
+
+                    std::vector<ROOT::Math::XYZPoint>
+                        shadow_stage2_positions =
+                            previous_charge_locations;
+
+                    unsigned int
+                        shadow_active_moving_groups = 0;
+
+                    double
+                        shadow_displacement_squared_sum =
+                            0.0;
+
+                    double
+                        shadow_max_displacement =
+                            0.0;
+
+                    for(unsigned int source_index = 0;
+                        source_index
+                            < propagating_charges.size();
+                        source_index++) {
+
+                        if(
+                            substep_source_active[
+                                source_index
+                            ] == 0U
+                        ) {
+                            continue;
+                        }
+
+                        if(
+                            previous_charge_states[
+                                source_index
+                            ] != CarrierState::MOTION
+                        ) {
+                            continue;
+                        }
+
+                        const auto initial_position =
+                            convertPointToVector(
+                                previous_charge_locations[
+                                    source_index
+                                ]
+                            );
+
+                        const auto source_type =
+                            propagating_charges[
+                                source_index
+                            ].getType();
+
+                        if(has_magnetic_field_) {
+                            shadow_k1[source_index] =
+                                carrier_velocity_withB(
+                                    substep_start,
+                                    initial_position,
+                                    source_type,
+                                    source_index,
+                                    previous_charge_locations,
+                                    previous_charge_states,
+                                    substep_source_active,
+                                    SourceActivationMode::
+                                        EXPLICIT_MASK,
+                                    false
+                                );
+                        } else {
+                            shadow_k1[source_index] =
+                                carrier_velocity_noB(
+                                    substep_start,
+                                    initial_position,
+                                    source_type,
+                                    source_index,
+                                    previous_charge_locations,
+                                    previous_charge_states,
+                                    substep_source_active,
+                                    SourceActivationMode::
+                                        EXPLICIT_MASK,
+                                    false
+                                );
+                        }
+
+                        const auto stage2_position =
+                            initial_position
+                            + 0.5
+                                * substep_size
+                                * shadow_k1[
+                                    source_index
+                                ];
+
+                        shadow_stage2_positions[
+                            source_index
+                        ] =
+                            convertVectorToPoint(
+                                stage2_position
+                            );
+
+                        const double displacement =
+                            (
+                                stage2_position
+                                - initial_position
+                            ).norm();
+
+                        shadow_displacement_squared_sum +=
+                            displacement
+                            * displacement;
+
+                        shadow_max_displacement =
+                            std::max(
+                                shadow_max_displacement,
+                                displacement
+                            );
+
+                        shadow_active_moving_groups++;
+                    }
+
+                    const double
+                        shadow_rms_displacement =
+                            shadow_active_moving_groups > 0
+                                ? std::sqrt(
+                                    shadow_displacement_squared_sum
+                                    / static_cast<double>(
+                                        shadow_active_moving_groups
+                                    )
+                                )
+                                : 0.0;
+
+                    const auto&
+                        diagnostic_target_stage2_position =
+                            shadow_stage2_positions[
+                                diagnostic_target_index
+                            ];
+
+                    // Both calls use the same target trial position and
+                    // explicit activation mask. They differ only in whether
+                    // the source cloud is frozen or moved to the common K2
+                    // stage positions.
+                    const auto
+                        frozen_source_stage2_field =
+                            coulomb_efield(
+                                substep_start,
+                                diagnostic_target_stage2_position,
+                                diagnostic_target_index,
+                                previous_charge_locations,
+                                previous_charge_states,
+                                substep_source_active,
+                                SourceActivationMode::
+                                    EXPLICIT_MASK,
+                                false
+                            );
+
+                    const auto
+                        common_source_stage2_field =
+                            coulomb_efield(
+                                substep_start,
+                                diagnostic_target_stage2_position,
+                                diagnostic_target_index,
+                                shadow_stage2_positions,
+                                previous_charge_states,
+                                substep_source_active,
+                                SourceActivationMode::
+                                    EXPLICIT_MASK,
+                                false
+                            );
+
+                    const auto
+                        stage2_source_coupling_difference =
+                            common_source_stage2_field
+                            - frozen_source_stage2_field;
+
+                    LOG(WARNING)
+                        << "[COUPLED_RK4_COMMON_STAGE_CHECK]"
+                        << "\n  substep index = "
+                        << substep_index
+                        << "\n  substep start = "
+                        << std::setprecision(
+                            std::numeric_limits<double>::
+                                max_digits10
+                        )
+                        << Units::convert(
+                            substep_start,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  substep size = "
+                        << Units::convert(
+                            substep_size,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  active moving groups = "
+                        << shadow_active_moving_groups
+                        << "\n  diagnostic target index = "
+                        << diagnostic_target_index
+                        << "\n  RMS K2 source displacement = "
+                        << Units::convert(
+                            shadow_rms_displacement,
+                            "um"
+                        )
+                        << " um"
+                        << "\n  maximum K2 source displacement = "
+                        << Units::convert(
+                            shadow_max_displacement,
+                            "um"
+                        )
+                        << " um"
+                        << "\n  frozen-source K2 field, internal = ("
+                        << frozen_source_stage2_field.x()
+                        << ", "
+                        << frozen_source_stage2_field.y()
+                        << ", "
+                        << frozen_source_stage2_field.z()
+                        << ")"
+                        << "\n  common-source K2 field, internal = ("
+                        << common_source_stage2_field.x()
+                        << ", "
+                        << common_source_stage2_field.y()
+                        << ", "
+                        << common_source_stage2_field.z()
+                        << ")"
+                        << "\n  common-minus-frozen field, internal = ("
+                        << stage2_source_coupling_difference.x()
+                        << ", "
+                        << stage2_source_coupling_difference.y()
+                        << ", "
+                        << stage2_source_coupling_difference.z()
+                        << ")"
+                        << "\n  field-difference magnitude = "
+                        << Units::convert(
+                            stage2_source_coupling_difference.norm(),
+                            "V/cm"
+                        )
+                        << " V/cm";
+                }
             }
         }
 
