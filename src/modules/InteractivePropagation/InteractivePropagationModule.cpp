@@ -922,6 +922,7 @@ InteractivePropagationModule::propagate_together(Event* event,
     std::vector<double> charge_times; // Most recent time for all of the charges (by the end of propagation they should all be aligned)
     std::vector<allpix::CarrierState> charge_states; // The state of propagation of each charge group (whether it's propagated, trapped, or halted)
     std::vector<allpix::CarrierState> previous_charge_states; // States frozen at the beginning of the current outer timestep. These are used for all Coulomb evaluations during that timestep.
+    std::vector<std::uint8_t> all_sources_enabled;// Explicit source-activation mask. The existing independent solver enables every group here and continues to use deposition-time gating. The later coupled solver will provide a fixed mask for each substep.
     double_t time = 0; // The current time threshold (we only propagate charges near this time)
 
     // Temporary diagnostic counter:
@@ -1066,6 +1067,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             unsigned int target_index,
             const std::vector<ROOT::Math::XYZPoint>& source_positions,
             const std::vector<allpix::CarrierState>& source_states,
+            const std::vector<std::uint8_t>& source_active,
             bool record_diagnostics)
             -> Eigen::Vector3d {
 
@@ -1082,6 +1084,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         unsigned int debug_sources_outside_cutoff = 0;
         unsigned int debug_sources_eligible = 0;
         unsigned int debug_sources_overlapping = 0;
+        unsigned int debug_sources_inactive = 0;
 
 
         auto coulomb_start = std::chrono::system_clock::now();
@@ -1121,9 +1124,16 @@ InteractivePropagationModule::propagate_together(Event* event,
             );
         }
 
-        if(source_positions.size() != propagating_charges.size() ||
-            source_states.size() != propagating_charges.size() ||
-            target_index >= propagating_charges.size()) {
+        if(
+            source_positions.size()
+                != propagating_charges.size()
+            || source_states.size()
+                != propagating_charges.size()
+            || source_active.size()
+                != propagating_charges.size()
+            || target_index
+                >= propagating_charges.size()
+        ) {
             throw ModuleError(
                 "InteractivePropagation internal vector size or target-index "
                 "mismatch in coulomb_efield"
@@ -1141,6 +1151,13 @@ InteractivePropagationModule::propagate_together(Event* event,
             //     continue;
             // }
             debug_sources_total++;
+
+            // Keep the source population fixed throughout one coupled
+            // substep, including its K4 endpoint.
+            if(source_active[i] == 0U) {
+                debug_sources_inactive++;
+                continue;
+            }
 
             if(
                 propagating_charges[i].getLocalTime()
@@ -1460,6 +1477,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << " um"
                 << "\n  sources inspected = "
                 << debug_sources_total
+                << "\n  skipped: inactive by explicit mask = "
+                << debug_sources_inactive
                 << "\n  skipped: future deposition = "
                 << debug_sources_future
                 << "\n  skipped: halted = "
@@ -1537,6 +1556,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             unsigned int,
             const std::vector<ROOT::Math::XYZPoint>&,
             const std::vector<allpix::CarrierState>&,
+            const std::vector<std::uint8_t>&,
             bool
         )
     > carrier_velocity_noB =
@@ -1546,6 +1566,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             unsigned int target_index,
             const std::vector<ROOT::Math::XYZPoint>& source_positions,
             const std::vector<allpix::CarrierState>& source_states,
+            const std::vector<std::uint8_t>& source_active,
             bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
@@ -1571,6 +1592,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             target_index,
             source_positions,
             source_states,
+            source_active,
             record_coulomb_diagnostics
         );
 
@@ -1596,6 +1618,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             unsigned int,
             const std::vector<ROOT::Math::XYZPoint>&,
             const std::vector<allpix::CarrierState>&,
+            const std::vector<std::uint8_t>&,
             bool
         )
     > carrier_velocity_withB =
@@ -1605,6 +1628,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             unsigned int target_index,
             const std::vector<ROOT::Math::XYZPoint>& source_positions,
             const std::vector<allpix::CarrierState>& source_states,
+            const std::vector<std::uint8_t>& source_active,
             bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
@@ -1630,6 +1654,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             target_index,
             source_positions,
             source_states,
+            source_active,
             record_coulomb_diagnostics
         );
 
@@ -1753,6 +1778,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     i,
                     previous_charge_locations,
                     previous_charge_states,
+                    all_sources_enabled,
                     true
                 );
             };
@@ -1770,6 +1796,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     i,
                     previous_charge_locations,
                     previous_charge_states,
+                    all_sources_enabled,
                     true
                 );
             };
@@ -1814,6 +1841,10 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         previous_charge_states.push_back(
             charge.getState()
+        );
+
+        all_sources_enabled.push_back(
+            1U
         );
 
         if(output_linegraphs_) {
@@ -2361,6 +2392,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 i,
                 previous_charge_locations,
                 previous_charge_states,
+                all_sources_enabled,
                 true
             );
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
