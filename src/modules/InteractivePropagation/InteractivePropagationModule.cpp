@@ -3996,7 +3996,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                     1U,
                     2U,
                     4U,
-                    8U
+                    8U,
+                    16U,
+                    32U,
+                    64U,
+                    128U
                 };
 
             // The factor-1 calculation should reproduce the existing
