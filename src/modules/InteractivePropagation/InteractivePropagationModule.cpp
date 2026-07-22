@@ -2134,6 +2134,106 @@ InteractivePropagationModule::propagate_together(Event* event,
                 charge_states[i];
         }
 
+        if(time == 0.0) {
+
+            const double step_start =
+                time;
+
+            const double step_end =
+                time + timestep_;
+
+            std::vector<double> exact_boundaries;
+            exact_boundaries.reserve(
+                propagating_charges.size() + 2
+            );
+
+            exact_boundaries.push_back(
+                step_start
+            );
+
+            for(const auto& charge_group :
+                propagating_charges) {
+
+                const double activation_time =
+                    charge_group.getLocalTime();
+
+                if(
+                    activation_time > step_start
+                    && activation_time < step_end
+                ) {
+                    exact_boundaries.push_back(
+                        activation_time
+                    );
+                }
+            }
+
+            exact_boundaries.push_back(
+                step_end
+            );
+
+            std::sort(
+                exact_boundaries.begin(),
+                exact_boundaries.end()
+            );
+
+            exact_boundaries.erase(
+                std::unique(
+                    exact_boundaries.begin(),
+                    exact_boundaries.end()
+                ),
+                exact_boundaries.end()
+            );
+
+            const double boundary_merge_tolerance =
+                64.0
+                * std::numeric_limits<double>::epsilon()
+                * std::max(
+                    {
+                        1.0,
+                        std::abs(step_start),
+                        std::abs(step_end)
+                    }
+                );
+
+            std::vector<double> merged_boundaries;
+            merged_boundaries.reserve(
+                exact_boundaries.size()
+            );
+
+            for(const double boundary :
+                exact_boundaries) {
+
+                if(
+                    merged_boundaries.empty()
+                    || std::abs(
+                        boundary
+                        - merged_boundaries.back()
+                    ) > boundary_merge_tolerance
+                ) {
+                    merged_boundaries.push_back(
+                        boundary
+                    );
+                }
+            }
+
+            LOG(WARNING)
+                << "[COUPLED_RK4_SUBSTEP_SCHEDULE]"
+                << "\n  exact boundary count = "
+                << exact_boundaries.size()
+                << "\n  exact substep count = "
+                << exact_boundaries.size() - 1
+                << "\n  merged boundary count = "
+                << merged_boundaries.size()
+                << "\n  merged substep count = "
+                << merged_boundaries.size() - 1
+                << "\n  merge tolerance = "
+                << Units::convert(
+                    boundary_merge_tolerance,
+                    "ns"
+                )
+                << " ns";
+        }
+
         // Move all charges by a single timestep
         for (unsigned int i = 0; i < propagating_charges.size(); i++){
             
