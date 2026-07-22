@@ -2555,6 +2555,27 @@ InteractivePropagationModule::propagate_together(Event* event,
             bool have_final_substep_only_target =
                 false;
 
+            std::vector<ROOT::Math::XYZPoint>
+                pre_final_sequential_positions =
+                    previous_charge_locations;
+
+            bool have_pre_final_sequential_positions =
+                false;
+
+            std::vector<ROOT::Math::XYZPoint>
+                helper_final_substep_only_positions =
+                    previous_charge_locations;
+
+            bool have_helper_final_substep_only_positions =
+                false;
+
+            std::vector<ROOT::Math::XYZPoint>
+                manual_final_substep_only_positions =
+                    previous_charge_locations;
+
+            bool have_manual_final_substep_only_positions =
+                false;
+
             for(std::size_t substep_index = 0;
                 substep_index + 1 < merged_boundaries.size();
                 substep_index++) {
@@ -2618,6 +2639,34 @@ InteractivePropagationModule::propagate_together(Event* event,
                     ) {
                         newly_active_groups++;
                     }
+                }
+
+                const bool is_final_activation_substep =
+                    substep_index + 2
+                    == merged_boundaries.size();
+
+                if(is_final_activation_substep) {
+
+                    // State produced by sequentially traversing substeps 0–17.
+                    pre_final_sequential_positions =
+                        sequential_shadow_positions;
+
+                    have_pre_final_sequential_positions =
+                        true;
+
+                    // Evaluate the final substep using the reusable helper, but
+                    // begin from the original positions. This should reproduce
+                    // the manually written final-substep-only RK4 calculation.
+                    helper_final_substep_only_positions =
+                        advance_coupled_shadow_substep(
+                            previous_charge_locations,
+                            substep_source_active,
+                            substep_start,
+                            substep_end
+                        );
+
+                    have_helper_final_substep_only_positions =
+                        true;
                 }
 
                 sequential_shadow_positions =
@@ -2752,10 +2801,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 // final activation substep. This remains a shadow calculation:
                 // no physical positions, states, RK objects, pulses, or random
                 // numbers are modified.
-                if(
-                    substep_index + 2
-                    == merged_boundaries.size()
-                ) {
+                if(is_final_activation_substep) {
 
                     constexpr unsigned int
                         diagnostic_target_index = 0U;
@@ -3132,7 +3178,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             );
                     }
 
-                                        const auto diagnostic_target_initial_position =
+                    const auto diagnostic_target_initial_position =
                         convertPointToVector(
                             previous_charge_locations[
                                 diagnostic_target_index
@@ -3232,6 +3278,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 diagnostic_target_index
                             ]
                         );
+
+                    manual_final_substep_only_positions =
+                        shadow_final_positions;
+
+                    have_manual_final_substep_only_positions =
+                        true;
 
                     final_substep_only_target_position =
                         coupled_target_final_position;
@@ -3492,16 +3544,261 @@ InteractivePropagationModule::propagate_together(Event* event,
                         << " um";
                 }
             }
+
+            if(
+                !have_pre_final_sequential_positions
+                || !have_helper_final_substep_only_positions
+                || !have_manual_final_substep_only_positions
+            ) {
+                throw ModuleError(
+                    "Incomplete sequential-entry coupled RK4 diagnostic"
+                );
+            }
             
-                        if(!have_final_substep_only_target) {
+            if(!have_final_substep_only_target) {
                 throw ModuleError(
                     "Final-substep-only coupled RK4 diagnostic "
                     "was not produced"
                 );
             }
 
+            const double final_substep_start =
+                merged_boundaries[
+                    merged_boundaries.size() - 2
+                ];
+
             constexpr unsigned int
                 diagnostic_target_index = 0U;
+
+            unsigned int comparison_group_count =
+                0U;
+
+            unsigned int comparison_nonfinite_count =
+                0U;
+
+            double pre_final_displacement_squared_sum =
+                0.0;
+
+            double pre_final_max_displacement =
+                0.0;
+
+            double helper_manual_difference_squared_sum =
+                0.0;
+
+            double helper_manual_max_difference =
+                0.0;
+
+            for(unsigned int i = 0;
+                i < propagating_charges.size();
+                i++) {
+
+                if(
+                    propagating_charges[i].getLocalTime()
+                        > final_substep_start
+                            + boundary_merge_tolerance
+                    || previous_charge_states[i]
+                        != CarrierState::MOTION
+                ) {
+                    continue;
+                }
+
+                const auto initial_position =
+                    convertPointToVector(
+                        previous_charge_locations[i]
+                    );
+
+                const auto pre_final_position =
+                    convertPointToVector(
+                        pre_final_sequential_positions[i]
+                    );
+
+                const auto helper_final_position =
+                    convertPointToVector(
+                        helper_final_substep_only_positions[i]
+                    );
+
+                const auto manual_final_position =
+                    convertPointToVector(
+                        manual_final_substep_only_positions[i]
+                    );
+
+                if(
+                    !pre_final_position.allFinite()
+                    || !helper_final_position.allFinite()
+                    || !manual_final_position.allFinite()
+                ) {
+                    comparison_nonfinite_count++;
+                    continue;
+                }
+
+                const double pre_final_displacement =
+                    (
+                        pre_final_position
+                        - initial_position
+                    ).norm();
+
+                const double helper_manual_difference =
+                    (
+                        helper_final_position
+                        - manual_final_position
+                    ).norm();
+
+                pre_final_displacement_squared_sum +=
+                    pre_final_displacement
+                    * pre_final_displacement;
+
+                pre_final_max_displacement =
+                    std::max(
+                        pre_final_max_displacement,
+                        pre_final_displacement
+                    );
+
+                helper_manual_difference_squared_sum +=
+                    helper_manual_difference
+                    * helper_manual_difference;
+
+                helper_manual_max_difference =
+                    std::max(
+                        helper_manual_max_difference,
+                        helper_manual_difference
+                    );
+
+                comparison_group_count++;
+            }
+
+            const double pre_final_rms_displacement =
+                comparison_group_count > 0U
+                    ? std::sqrt(
+                        pre_final_displacement_squared_sum
+                        / static_cast<double>(
+                            comparison_group_count
+                        )
+                    )
+                    : 0.0;
+
+            const double helper_manual_rms_difference =
+                comparison_group_count > 0U
+                    ? std::sqrt(
+                        helper_manual_difference_squared_sum
+                        / static_cast<double>(
+                            comparison_group_count
+                        )
+                    )
+                    : 0.0;
+
+            const auto target_initial_position =
+                convertPointToVector(
+                    previous_charge_locations[
+                        diagnostic_target_index
+                    ]
+                );
+
+            const auto target_pre_final_position =
+                convertPointToVector(
+                    pre_final_sequential_positions[
+                        diagnostic_target_index
+                    ]
+                );
+
+            const auto target_pre_final_displacement =
+                target_pre_final_position
+                - target_initial_position;
+
+            const auto target_helper_manual_difference =
+                convertPointToVector(
+                    helper_final_substep_only_positions[
+                        diagnostic_target_index
+                    ]
+                )
+                - convertPointToVector(
+                    manual_final_substep_only_positions[
+                        diagnostic_target_index
+                    ]
+                );
+
+            LOG(WARNING)
+                << "[COUPLED_RK4_SEQUENTIAL_ENTRY_VALIDATION]"
+                << "\n  final substep start = "
+                << std::setprecision(
+                    std::numeric_limits<double>::max_digits10
+                )
+                << Units::convert(
+                    final_substep_start,
+                    "ns"
+                )
+                << " ns"
+                << "\n  groups compared = "
+                << comparison_group_count
+                << "\n  groups with non-finite values = "
+                << comparison_nonfinite_count
+                << "\n  pre-final RMS cloud displacement = "
+                << Units::convert(
+                    pre_final_rms_displacement,
+                    "um"
+                )
+                << " um"
+                << "\n  pre-final maximum cloud displacement = "
+                << Units::convert(
+                    pre_final_max_displacement,
+                    "um"
+                )
+                << " um"
+                << "\n  target pre-final displacement = ("
+                << Units::convert(
+                    target_pre_final_displacement.x(),
+                    "um"
+                )
+                << ", "
+                << Units::convert(
+                    target_pre_final_displacement.y(),
+                    "um"
+                )
+                << ", "
+                << Units::convert(
+                    target_pre_final_displacement.z(),
+                    "um"
+                )
+                << ") um"
+                << "\n  target pre-final displacement magnitude = "
+                << Units::convert(
+                    target_pre_final_displacement.norm(),
+                    "um"
+                )
+                << " um"
+                << "\n  helper-minus-manual RMS endpoint difference = "
+                << Units::convert(
+                    helper_manual_rms_difference,
+                    "um"
+                )
+                << " um"
+                << "\n  helper-minus-manual maximum endpoint difference = "
+                << Units::convert(
+                    helper_manual_max_difference,
+                    "um"
+                )
+                << " um"
+                << "\n  target helper-minus-manual difference = ("
+                << Units::convert(
+                    target_helper_manual_difference.x(),
+                    "um"
+                )
+                << ", "
+                << Units::convert(
+                    target_helper_manual_difference.y(),
+                    "um"
+                )
+                << ", "
+                << Units::convert(
+                    target_helper_manual_difference.z(),
+                    "um"
+                )
+                << ") um"
+                << "\n  target helper-minus-manual magnitude = "
+                << Units::convert(
+                    target_helper_manual_difference.norm(),
+                    "um"
+                )
+                << " um";
 
             const auto sequential_target_initial_position =
                 convertPointToVector(
