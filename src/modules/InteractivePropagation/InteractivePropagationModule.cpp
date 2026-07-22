@@ -2232,6 +2232,81 @@ InteractivePropagationModule::propagate_together(Event* event,
                     "ns"
                 )
                 << " ns";
+
+            for(std::size_t substep_index = 0;
+                substep_index + 1 < merged_boundaries.size();
+                substep_index++) {
+
+                const double substep_start =
+                    merged_boundaries[substep_index];
+
+                const double substep_end =
+                    merged_boundaries[substep_index + 1];
+
+                const double substep_size =
+                    substep_end - substep_start;
+
+                unsigned int active_groups_at_start = 0;
+                unsigned int newly_active_groups = 0;
+
+                for(const auto& charge_group :
+                    propagating_charges) {
+
+                    const double activation_time =
+                        charge_group.getLocalTime();
+
+                    // A group is present throughout this substep when its
+                    // activation time lies at or numerically before the
+                    // merged substep boundary.
+                    if(
+                        activation_time
+                        <= substep_start
+                        + boundary_merge_tolerance
+                    ) {
+                        active_groups_at_start++;
+                    }
+
+                    // Count groups represented by this merged boundary.
+                    if(
+                        std::abs(
+                            activation_time
+                            - substep_start
+                        ) <= boundary_merge_tolerance
+                    ) {
+                        newly_active_groups++;
+                    }
+                }
+
+                LOG(WARNING)
+                    << "[COUPLED_RK4_SUBSTEP]"
+                    << "\n  substep index = "
+                    << substep_index
+                    << "\n  start = "
+                    << std::setprecision(
+                        std::numeric_limits<double>::max_digits10
+                    )
+                    << Units::convert(
+                        substep_start,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  end = "
+                    << Units::convert(
+                        substep_end,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  size = "
+                    << Units::convert(
+                        substep_size,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  newly active groups = "
+                    << newly_active_groups
+                    << "\n  active groups during substep = "
+                    << active_groups_at_start;
+            }
         }
 
         // Move all charges by a single timestep
