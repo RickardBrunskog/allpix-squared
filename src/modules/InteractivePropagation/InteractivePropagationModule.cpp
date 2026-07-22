@@ -18,7 +18,7 @@
 #include <memory>
 #include <string>
 #include <utility>
-
+#include <iomanip>
 #include <Eigen/Core>
 
 #include "core/utils/distributions.h"
@@ -762,6 +762,12 @@ void InteractivePropagationModule::run(Event* event) {
                 "ns"
             )
             << " ns"
+            << "\n  configured timestep = "
+            << Units::convert(
+                timestep_,
+                "ns"
+            )
+            << " ns"
             << "\n  span / timestep = "
             << deposition_time_span
                 / timestep_
@@ -788,6 +794,9 @@ void InteractivePropagationModule::run(Event* event) {
                 << "\n  activation index = "
                 << displayed_times
                 << "\n  deposition time = "
+                << std::setprecision(
+                    std::numeric_limits<double>::max_digits10
+                )
                 << Units::convert(
                     deposition_time,
                     "ns"
@@ -1054,12 +1063,14 @@ InteractivePropagationModule::propagate_together(Event* event,
         [&](double evaluation_time,
             const ROOT::Math::XYZPoint& point,
             unsigned int target_index,
-            const std::vector<ROOT::Math::XYZPoint>& source_positions)
+            const std::vector<ROOT::Math::XYZPoint>& source_positions,
+            const std::vector<allpix::CarrierState>& source_states,
+            bool record_diagnostics)
             -> Eigen::Vector3d {
 
-        
         const bool debug_this_call =
-            coulomb_debug_call_count < 20;
+            record_diagnostics
+            && coulomb_debug_call_count < 20;
 
         unsigned int debug_sources_total = 0;
         unsigned int debug_sources_future = 0;
@@ -1098,7 +1109,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "\n  Coulomb repulsion is disabled";
             }
 
-            coulomb_debug_call_count++;
+            if(record_diagnostics) {
+                coulomb_debug_call_count++;
+            }
 
             return Eigen::Vector3d(
                 field.x(),
@@ -1108,7 +1121,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         }
 
         if(source_positions.size() != propagating_charges.size() ||
-            charge_states.size() != propagating_charges.size() ||
+            source_states.size() != propagating_charges.size() ||
             target_index >= propagating_charges.size()) {
             throw ModuleError(
                 "InteractivePropagation internal vector size or target-index "
@@ -1136,12 +1149,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                 continue;
             }
 
-            if(charge_states[i] == CarrierState::HALTED) {
+            if(source_states[i] == CarrierState::HALTED) {
                 debug_sources_halted++;
                 continue;
             }
 
-            if(charge_states[i] == CarrierState::RECOMBINED) {
+            if(source_states[i] == CarrierState::RECOMBINED) {
                 debug_sources_recombined++;
                 continue;
             }
@@ -1210,7 +1223,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                             uncapped_interaction_magnitude
                         );
 
-                    if(!coulomb_debug_first_pair_logged) {
+                    if(
+                        record_diagnostics
+                        && !coulomb_debug_first_pair_logged
+                    ) {
                         LOG(WARNING)
                             << "[COULOMB_DEBUG_PAIR]"
                             << "\n  call number = "
@@ -1289,7 +1305,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                     }
 
                     if(
-                        !coulomb_debug_first_cap_logged
+                        record_diagnostics
+                        && !coulomb_debug_first_cap_logged
                         && uncapped_interaction_magnitude
                         > coulomb_field_limit_
                     ) {
@@ -1333,7 +1350,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                     }
 
                     if(
-                        output_plots_
+                        record_diagnostics
+                        && output_plots_
                         && std::isfinite(
                             interaction_magnitude
                         )
@@ -1494,13 +1512,16 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << " V/cm";
         }
 
-        coulomb_debug_call_count++;
+        if(record_diagnostics) {
+            coulomb_debug_call_count++;
+        }
 
         Eigen::Vector3d output = Eigen::Vector3d(field.x(),field.y(),field.z());
 
-        auto coulomb_end = std::chrono::system_clock::now();
-
-        time_spent_coulomb += coulomb_end - coulomb_start;
+        if(record_diagnostics) {
+            auto coulomb_end = std::chrono::system_clock::now();
+            time_spent_coulomb += coulomb_end - coulomb_start;
+        }
 
         return output;
     };
@@ -1513,14 +1534,18 @@ InteractivePropagationModule::propagate_together(Event* event,
             const Eigen::Vector3d&,
             allpix::CarrierType,
             unsigned int,
-            const std::vector<ROOT::Math::XYZPoint>&
+            const std::vector<ROOT::Math::XYZPoint>&,
+            const std::vector<allpix::CarrierState>&,
+            bool
         )
     > carrier_velocity_noB =
         [&](double evaluation_time,
             const Eigen::Vector3d& cur_pos,
             allpix::CarrierType type,
             unsigned int target_index,
-            const std::vector<ROOT::Math::XYZPoint>& source_positions)
+            const std::vector<ROOT::Math::XYZPoint>& source_positions,
+            const std::vector<allpix::CarrierState>& source_states,
+            bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
         const auto local_position =
@@ -1543,7 +1568,9 @@ InteractivePropagationModule::propagate_together(Event* event,
             evaluation_time,
             local_position,
             target_index,
-            source_positions
+            source_positions,
+            source_states,
+            record_coulomb_diagnostics
         );
 
         const auto doping =
@@ -1566,14 +1593,18 @@ InteractivePropagationModule::propagate_together(Event* event,
             const Eigen::Vector3d&,
             allpix::CarrierType,
             unsigned int,
-            const std::vector<ROOT::Math::XYZPoint>&
+            const std::vector<ROOT::Math::XYZPoint>&,
+            const std::vector<allpix::CarrierState>&,
+            bool
         )
     > carrier_velocity_withB =
         [&](double evaluation_time,
             const Eigen::Vector3d& cur_pos,
             allpix::CarrierType type,
             unsigned int target_index,
-            const std::vector<ROOT::Math::XYZPoint>& source_positions)
+            const std::vector<ROOT::Math::XYZPoint>& source_positions,
+            const std::vector<allpix::CarrierState>& source_states,
+            bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
         const auto local_position =
@@ -1596,7 +1627,9 @@ InteractivePropagationModule::propagate_together(Event* event,
             evaluation_time,
             local_position,
             target_index,
-            source_positions
+            source_positions,
+            source_states,
+            record_coulomb_diagnostics
         );
 
         const auto magnetic_field =
@@ -1717,7 +1750,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                     trial_position,
                     charge_type,
                     i,
-                    previous_charge_locations
+                    previous_charge_locations,
+                    charge_states,
+                    true
                 );
             };
         } else {
@@ -1732,7 +1767,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                     trial_position,
                     charge_type,
                     i,
-                    previous_charge_locations
+                    previous_charge_locations,
+                    charge_states,
+                    true
                 );
             };
         }
@@ -2133,13 +2170,57 @@ InteractivePropagationModule::propagate_together(Event* event,
                 pre_step_time,
                 position,
                 i,
-                previous_charge_locations
+                previous_charge_locations,
+                charge_states,
+                true
             );
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
 
-            // Execute a Runge Kutta step and update time in the vector
-            auto step = runge_kutta.step();
-            charge_times[i]  = runge_kutta.getTime();
+            // Execute a Runge-Kutta step and verify how the solver advances
+            // its internal physical time.
+            const double rk_time_before =
+                runge_kutta.getTime();
+
+            auto step =
+                runge_kutta.step();
+
+            const double rk_time_after =
+                runge_kutta.getTime();
+
+            if(time == 0.0 && i < 4) {
+                LOG(WARNING)
+                    << "[RK4_TIME_ADVANCE_DEBUG]"
+                    << "\n  target group index = "
+                    << i
+                    << "\n  configured timestep = "
+                    << Units::convert(
+                        timestep_,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  RK time before step = "
+                    << Units::convert(
+                        rk_time_before,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  RK time after step = "
+                    << Units::convert(
+                        rk_time_after,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  RK time increment = "
+                    << Units::convert(
+                        rk_time_after
+                            - rk_time_before,
+                        "ns"
+                    )
+                    << " ns";
+            }
+
+            charge_times[i] =
+                rk_time_after;
             
             // Get the new position due to the electric field
             position = convertVectorToPoint(runge_kutta.getValue());
