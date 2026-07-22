@@ -3988,6 +3988,402 @@ InteractivePropagationModule::propagate_together(Event* event,
                     "um"
                 )
                 << " um";
+
+                        // Test convergence of the coupled deterministic endpoint while
+            // retaining every merged charge-activation boundary.
+            const std::vector<unsigned int>
+                refinement_factors = {
+                    1U,
+                    2U,
+                    4U,
+                    8U
+                };
+
+            // The factor-1 calculation should reproduce the existing
+            // sequential shadow exactly.
+            auto previous_refinement_positions =
+                sequential_shadow_positions;
+
+            for(const auto refinement_factor :
+                refinement_factors) {
+
+                const double max_shadow_substep =
+                    timestep_
+                    / static_cast<double>(
+                        refinement_factor
+                    );
+
+                auto refined_positions =
+                    previous_charge_locations;
+
+                unsigned int
+                    refined_substeps_advanced = 0U;
+
+                double largest_actual_substep =
+                    0.0;
+
+                // Retain all activation boundaries. Each interval between
+                // two activation boundaries can then be subdivided further.
+                for(std::size_t interval_index = 0;
+                    interval_index + 1
+                        < merged_boundaries.size();
+                    interval_index++) {
+
+                    const double interval_start =
+                        merged_boundaries[
+                            interval_index
+                        ];
+
+                    const double interval_end =
+                        merged_boundaries[
+                            interval_index + 1
+                        ];
+
+                    const double interval_size =
+                        interval_end
+                        - interval_start;
+
+                    std::vector<std::uint8_t>
+                        interval_active_mask(
+                            propagating_charges.size(),
+                            0U
+                        );
+
+                    for(unsigned int source_index = 0;
+                        source_index
+                            < propagating_charges.size();
+                        source_index++) {
+
+                        if(
+                            propagating_charges[
+                                source_index
+                            ].getLocalTime()
+                            <= interval_start
+                                + boundary_merge_tolerance
+                        ) {
+                            interval_active_mask[
+                                source_index
+                            ] = 1U;
+                        }
+                    }
+
+                    const unsigned int
+                        number_of_pieces =
+                            std::max(
+                                1U,
+                                static_cast<unsigned int>(
+                                    std::ceil(
+                                        interval_size
+                                        / max_shadow_substep
+                                    )
+                                )
+                            );
+
+                    for(unsigned int piece_index = 0;
+                        piece_index
+                            < number_of_pieces;
+                        piece_index++) {
+
+                        const double piece_start =
+                            interval_start
+                            + interval_size
+                                * static_cast<double>(
+                                    piece_index
+                                )
+                                / static_cast<double>(
+                                    number_of_pieces
+                                );
+
+                        const double piece_end =
+                            piece_index + 1U
+                                    == number_of_pieces
+                                ? interval_end
+                                : interval_start
+                                    + interval_size
+                                        * static_cast<double>(
+                                            piece_index + 1U
+                                        )
+                                        / static_cast<double>(
+                                            number_of_pieces
+                                        );
+
+                        const double actual_substep =
+                            piece_end
+                            - piece_start;
+
+                        refined_positions =
+                            advance_coupled_shadow_substep(
+                                refined_positions,
+                                interval_active_mask,
+                                piece_start,
+                                piece_end
+                            );
+
+                        largest_actual_substep =
+                            std::max(
+                                largest_actual_substep,
+                                actual_substep
+                            );
+
+                        refined_substeps_advanced++;
+                    }
+                }
+
+                unsigned int
+                    refinement_groups_compared = 0U;
+
+                unsigned int
+                    refinement_nonfinite_groups = 0U;
+
+                double
+                    refinement_displacement_squared_sum =
+                        0.0;
+
+                double
+                    refinement_max_displacement =
+                        0.0;
+
+                double
+                    previous_endpoint_difference_squared_sum =
+                        0.0;
+
+                double
+                    previous_endpoint_max_difference =
+                        0.0;
+
+                for(unsigned int group_index = 0;
+                    group_index
+                        < propagating_charges.size();
+                    group_index++) {
+
+                    if(
+                        propagating_charges[
+                            group_index
+                        ].getLocalTime()
+                            > step_end
+                                + boundary_merge_tolerance
+                        || previous_charge_states[
+                            group_index
+                        ] != CarrierState::MOTION
+                    ) {
+                        continue;
+                    }
+
+                    const Eigen::Vector3d
+                        initial_position =
+                            convertPointToVector(
+                                previous_charge_locations[
+                                    group_index
+                                ]
+                            );
+
+                    const Eigen::Vector3d
+                        refined_position =
+                            convertPointToVector(
+                                refined_positions[
+                                    group_index
+                                ]
+                            );
+
+                    const Eigen::Vector3d
+                        previous_refinement_position =
+                            convertPointToVector(
+                                previous_refinement_positions[
+                                    group_index
+                                ]
+                            );
+
+                    if(
+                        !refined_position.allFinite()
+                        || !previous_refinement_position
+                            .allFinite()
+                    ) {
+                        refinement_nonfinite_groups++;
+                        continue;
+                    }
+
+                    const double displacement =
+                        (
+                            refined_position
+                            - initial_position
+                        ).norm();
+
+                    const double endpoint_difference =
+                        (
+                            refined_position
+                            - previous_refinement_position
+                        ).norm();
+
+                    refinement_displacement_squared_sum +=
+                        displacement
+                        * displacement;
+
+                    refinement_max_displacement =
+                        std::max(
+                            refinement_max_displacement,
+                            displacement
+                        );
+
+                    previous_endpoint_difference_squared_sum +=
+                        endpoint_difference
+                        * endpoint_difference;
+
+                    previous_endpoint_max_difference =
+                        std::max(
+                            previous_endpoint_max_difference,
+                            endpoint_difference
+                        );
+
+                    refinement_groups_compared++;
+                }
+
+                const double refinement_rms_displacement =
+                    refinement_groups_compared > 0U
+                        ? std::sqrt(
+                            refinement_displacement_squared_sum
+                            / static_cast<double>(
+                                refinement_groups_compared
+                            )
+                        )
+                        : 0.0;
+
+                const double
+                    previous_endpoint_rms_difference =
+                        refinement_groups_compared > 0U
+                            ? std::sqrt(
+                                previous_endpoint_difference_squared_sum
+                                / static_cast<double>(
+                                    refinement_groups_compared
+                                )
+                            )
+                            : 0.0;
+
+                const Eigen::Vector3d
+                    refined_target_position =
+                        convertPointToVector(
+                            refined_positions[
+                                diagnostic_target_index
+                            ]
+                        );
+
+                const Eigen::Vector3d
+                    refined_target_displacement =
+                        refined_target_position
+                        - sequential_target_initial_position;
+
+                const Eigen::Vector3d
+                    previous_target_position =
+                        convertPointToVector(
+                            previous_refinement_positions[
+                                diagnostic_target_index
+                            ]
+                        );
+
+                const Eigen::Vector3d
+                    refined_minus_previous_target =
+                        refined_target_position
+                        - previous_target_position;
+
+                LOG(WARNING)
+                    << "[COUPLED_RK4_TIMESTEP_REFINEMENT]"
+                    << "\n  refinement factor = "
+                    << refinement_factor
+                    << "\n  requested maximum substep = "
+                    << std::setprecision(
+                        std::numeric_limits<double>::
+                            max_digits10
+                    )
+                    << Units::convert(
+                        max_shadow_substep,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  actual coupled substeps = "
+                    << refined_substeps_advanced
+                    << "\n  largest actual substep = "
+                    << Units::convert(
+                        largest_actual_substep,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  groups compared = "
+                    << refinement_groups_compared
+                    << "\n  groups with non-finite positions = "
+                    << refinement_nonfinite_groups
+                    << "\n  RMS total displacement = "
+                    << Units::convert(
+                        refinement_rms_displacement,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  maximum total displacement = "
+                    << Units::convert(
+                        refinement_max_displacement,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  target displacement = ("
+                    << Units::convert(
+                        refined_target_displacement.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refined_target_displacement.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refined_target_displacement.z(),
+                        "um"
+                    )
+                    << ") um"
+                    << "\n  target displacement magnitude = "
+                    << Units::convert(
+                        refined_target_displacement.norm(),
+                        "um"
+                    )
+                    << " um"
+                    << "\n  target change from previous refinement = ("
+                    << Units::convert(
+                        refined_minus_previous_target.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refined_minus_previous_target.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refined_minus_previous_target.z(),
+                        "um"
+                    )
+                    << ") um"
+                    << "\n  target change magnitude = "
+                    << Units::convert(
+                        refined_minus_previous_target.norm(),
+                        "um"
+                    )
+                    << " um"
+                    << "\n  cloud RMS endpoint change from previous = "
+                    << Units::convert(
+                        previous_endpoint_rms_difference,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  cloud maximum endpoint change from previous = "
+                    << Units::convert(
+                        previous_endpoint_max_difference,
+                        "um"
+                    )
+                    << " um";
+
+                previous_refinement_positions =
+                    std::move(
+                        refined_positions
+                    );
+            }
         
         }
 
