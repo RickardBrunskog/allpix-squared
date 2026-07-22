@@ -50,12 +50,12 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
     config_.setDefault<double>("coulomb_distance_limit", Units::get(200.0,"um"));
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); 
-    // Diagnostic-only minimum pair separation used during the
-    // coupled-RK4 timestep-refinement sweep. A value of zero
-    // preserves the existing exact-overlap-only behavior.
+    // Diagnostic-only Plummer softening length used during the
+    // coupled-RK4 timestep-refinement sweep. A value of zero preserves
+    // the existing point-charge/exact-overlap behavior.
     config_.setDefault<double>(
-        "coulomb_refinement_core_distance",
-        Units::get(5.0, "nm")
+        "coulomb_refinement_softening_length",
+        Units::get(0.0, "nm")
     );
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
@@ -951,7 +951,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         std::uint64_t capped_overlap_pairs = 0U;
 
         std::uint64_t
-            refinement_core_substitutions = 0U;
+            pairs_inside_softening_length = 0U;
 
         std::uint64_t nonoverlap_pairs = 0U;
         std::uint64_t capped_nonoverlap_pairs = 0U;
@@ -993,23 +993,22 @@ InteractivePropagationModule::propagate_together(Event* event,
     const double overlap_distance =
         std::sqrt(1e-15); // Internal distance unit: mm
 
-    // Applied only while active_refinement_statistics is non-null,
-    // meaning only during the factor-1 ... factor-1024 shadow sweep.
-    const double refinement_core_distance =
+    const double refinement_softening_length =
         config_.get<double>(
-            "coulomb_refinement_core_distance"
+            "coulomb_refinement_softening_length"
         );
 
-    if(refinement_core_distance < 0.0) {
+    if(refinement_softening_length < 0.0) {
         throw ModuleError(
-            "coulomb_refinement_core_distance "
+            "coulomb_refinement_softening_length "
             "cannot be negative"
         );
     }
 
-    const double refinement_core_distance_squared =
-        refinement_core_distance
-        * refinement_core_distance;
+    const double
+        refinement_softening_length_squared =
+            refinement_softening_length
+            * refinement_softening_length;
 
     // SplitMix64 is used only to construct stable pair-dependent directions.
     // It does not modify the event random-number engine.
@@ -1281,12 +1280,15 @@ InteractivePropagationModule::propagate_together(Event* event,
                 target_index != i
                 && physical_dist_mag2 == 0.0;
 
-            const bool source_inside_refinement_core =
+            const bool use_refinement_softening =
+                active_refinement_statistics != nullptr
+                && refinement_softening_length > 0.0;
+
+            const bool source_inside_softening_length =
                 target_index != i
-                && active_refinement_statistics != nullptr
-                && refinement_core_distance > 0.0
+                && use_refinement_softening
                 && physical_dist_mag2
-                    < refinement_core_distance_squared;
+                    < refinement_softening_length_squared;
 
             if(source_overlaps_target) {
                 debug_sources_overlapping++;
@@ -1302,32 +1304,23 @@ InteractivePropagationModule::propagate_together(Event* event,
                 debug_sources_self++;
             } else {
 
-                if(source_inside_refinement_core) {
+                if(use_refinement_softening) {
 
-                    // Inside the diagnostic refinement core, use one stable
-                    // pair-dependent direction and enforce the configured
-                    // separation magnitude. This prevents the direction from
-                    // reversing when an electron-hole pair crosses through zero.
+                    // The softened kernel always uses the real physical pair vector.
+                    // At exact overlap this vector is zero, producing zero pair field
+                    // without requiring an arbitrary direction.
                     dist_vector =
-                        deterministic_overlap_separation(
-                            target_index,
-                            i
-                        );
+                        physical_dist_vector;
 
-                    dist_vector =
-                        dist_vector
-                        * (
-                            refinement_core_distance
-                            / overlap_distance
-                        );
-
-                    active_refinement_statistics
-                        ->refinement_core_substitutions++;
+                    if(source_inside_softening_length) {
+                        active_refinement_statistics
+                            ->pairs_inside_softening_length++;
+                    }
 
                 } else if(source_overlaps_target) {
 
-                    // Preserve the current exact-overlap behavior when the
-                    // refinement core is disabled.
+                    // Preserve the current exact-overlap behavior outside the
+                    // diagnostic softening sweep.
                     dist_vector =
                         deterministic_overlap_separation(
                             target_index,
@@ -1343,25 +1336,60 @@ InteractivePropagationModule::propagate_together(Event* event,
                 dist_mag2 =
                     dist_vector.Mag2();
 
-                if(dist_mag2 <= 0.0) {
+                if(
+                    dist_mag2 <= 0.0
+                    && !use_refinement_softening
+                ) {
                     debug_sources_zero_distance++;
+
                 } else if(
                     dist_mag2
                     >= coulomb_distance_limit_squared_
                 ) {
                     debug_sources_outside_cutoff++;
+
                 } else {
 
                     debug_sources_eligible++;
 
                     dist_mag =
-                        ROOT::Math::sqrt(dist_mag2);
+                        ROOT::Math::sqrt(
+                            std::max(
+                                0.0,
+                                dist_mag2
+                            )
+                        );
 
-                    const auto uncapped_interaction_magnitude =
-                        coulomb_K_
-                        / relative_permittivity_
-                        * static_cast<double>(q)
-                        / dist_mag2;
+                    double uncapped_interaction_magnitude =
+                        0.0;
+
+                    if(use_refinement_softening) {
+
+                        const double softened_radius_squared =
+                            dist_mag2
+                            + refinement_softening_length_squared;
+
+                        const double softened_radius_cubed =
+                            softened_radius_squared
+                            * ROOT::Math::sqrt(
+                                softened_radius_squared
+                            );
+
+                        uncapped_interaction_magnitude =
+                            coulomb_K_
+                            / relative_permittivity_
+                            * static_cast<double>(q)
+                            * dist_mag
+                            / softened_radius_cubed;
+
+                    } else {
+
+                        uncapped_interaction_magnitude =
+                            coulomb_K_
+                            / relative_permittivity_
+                            * static_cast<double>(q)
+                            / dist_mag2;
+                    }
                     
                     if(active_refinement_statistics != nullptr) {
 
@@ -1577,12 +1605,17 @@ InteractivePropagationModule::propagate_together(Event* event,
                         );
                     }
 
-                    field =
-                        field
-                        + dist_vector
-                            / dist_mag
-                            * sign
-                            * interaction_magnitude;
+                    if(
+                        dist_mag > 0.0
+                        && interaction_magnitude > 0.0
+                    ) {
+                        field =
+                            field
+                            + dist_vector
+                                / dist_mag
+                                * sign
+                                * interaction_magnitude;
+                    }
                 }
             }
 
@@ -4242,8 +4275,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                     1024U,
                 };
 
-            // The factor-1 calculation should reproduce the existing
-            // sequential shadow exactly.
+            // The previous endpoint initially contains the original no-core
+            // sequential shadow. With a nonzero diagnostic kernel, the factor-1
+            // difference therefore measures both the kernel change and the coarse
+            // timestep effect. Factors 2 and above compare adjacent refinements
+            // using the same diagnostic kernel.
             auto previous_refinement_positions =
                 sequential_shadow_positions;
 
@@ -4696,15 +4732,15 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "[COUPLED_RK4_COULOMB_REFINEMENT_STATS]"
                     << "\n  refinement factor = "
                     << refinement_factor
-                    << "\n  refinement core distance = "
+                    << "\n  refinement softening length = "
                     << Units::convert(
-                        refinement_core_distance,
+                        refinement_softening_length,
                         "nm"
                     )
                     << " nm"
-                    << "\n  refinement core substitutions = "
+                    << "\n  pairs inside softening length = "
                     << refinement_statistics
-                        .refinement_core_substitutions
+                        .pairs_inside_softening_length
                     << "\n  field evaluations = "
                     << refinement_statistics.field_evaluations
                     << "\n  eligible direct pair evaluations = "
