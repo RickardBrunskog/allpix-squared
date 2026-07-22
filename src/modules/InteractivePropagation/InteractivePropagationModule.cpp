@@ -1886,6 +1886,15 @@ InteractivePropagationModule::propagate_together(Event* event,
     ROOT::Math::XYZPoint previous_position{}; // = ROOT::Math::XYZPoint();
     allpix::CarrierType type = charge.getType();
     allpix::CarrierState state{};
+    // Store the deterministic coupled endpoint of target group 0 so it
+    // can be compared with the existing independent Runge-Kutta solver
+    // before diffusion and boundary corrections are applied.
+    Eigen::Vector3d
+        first_step_sequential_target_position =
+            Eigen::Vector3d::Zero();
+
+    bool have_first_step_sequential_target_position =
+        false;
 
     // Continue time propagation until the integration time has been reached
     for(time = 0; time < integration_time_; time += timestep_) { // time is the threshold value for each iteration
@@ -3704,17 +3713,18 @@ InteractivePropagationModule::propagate_together(Event* event,
                 target_pre_final_position
                 - target_initial_position;
 
-            const auto target_helper_manual_difference =
-                convertPointToVector(
-                    helper_final_substep_only_positions[
-                        diagnostic_target_index
-                    ]
-                )
-                - convertPointToVector(
-                    manual_final_substep_only_positions[
-                        diagnostic_target_index
-                    ]
-                );
+            const Eigen::Vector3d
+                target_helper_manual_difference =
+                    convertPointToVector(
+                        helper_final_substep_only_positions[
+                            diagnostic_target_index
+                        ]
+                    )
+                    - convertPointToVector(
+                        manual_final_substep_only_positions[
+                            diagnostic_target_index
+                        ]
+                    );
 
             LOG(WARNING)
                 << "[COUPLED_RK4_SEQUENTIAL_ENTRY_VALIDATION]"
@@ -3813,6 +3823,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                         diagnostic_target_index
                     ]
                 );
+
+            first_step_sequential_target_position =
+                sequential_target_final_position;
+
+            have_first_step_sequential_target_position =
+                true;
 
             const auto sequential_target_displacement =
                 sequential_target_final_position
@@ -4043,6 +4059,145 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             const double rk_time_after =
                 runge_kutta.getTime();
+
+            if(time == 0.0 && i == 0U) {
+
+                if(
+                    !have_first_step_sequential_target_position
+                ) {
+                    throw ModuleError(
+                        "Sequential coupled RK4 target endpoint "
+                        "was not produced"
+                    );
+                }
+
+                // This is the endpoint produced by the existing independent
+                // Runge-Kutta solver. Diffusion, surface handling,
+                // recombination, trapping and pulse induction have not yet
+                // been applied.
+                const Eigen::Vector3d
+                    legacy_target_final_position =
+                        runge_kutta.getValue();
+
+                const Eigen::Vector3d
+                    target_initial_position =
+                        convertPointToVector(
+                            previous_charge_locations[i]
+                        );
+
+                const Eigen::Vector3d
+                    legacy_target_displacement =
+                        legacy_target_final_position
+                        - target_initial_position;
+
+                const Eigen::Vector3d
+                    coupled_target_displacement =
+                        first_step_sequential_target_position
+                        - target_initial_position;
+
+                const Eigen::Vector3d
+                    coupled_minus_legacy_position =
+                        first_step_sequential_target_position
+                        - legacy_target_final_position;
+
+                LOG(WARNING)
+                    << "[COUPLED_RK4_LEGACY_ENDPOINT_CHECK]"
+                    << "\n  target group index = "
+                    << i
+                    << "\n  target deposition time = "
+                    << std::setprecision(
+                        std::numeric_limits<double>::max_digits10
+                    )
+                    << Units::convert(
+                        propagating_charges[i].getLocalTime(),
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  legacy RK start time = "
+                    << Units::convert(
+                        rk_time_before,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  legacy RK end time = "
+                    << Units::convert(
+                        rk_time_after,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  coupled endpoint time = "
+                    << Units::convert(
+                        time + timestep_,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  legacy deterministic displacement = ("
+                    << Units::convert(
+                        legacy_target_displacement.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        legacy_target_displacement.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        legacy_target_displacement.z(),
+                        "um"
+                    )
+                    << ") um"
+                    << "\n  coupled deterministic displacement = ("
+                    << Units::convert(
+                        coupled_target_displacement.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        coupled_target_displacement.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        coupled_target_displacement.z(),
+                        "um"
+                    )
+                    << ") um"
+                    << "\n  legacy displacement magnitude = "
+                    << Units::convert(
+                        legacy_target_displacement.norm(),
+                        "um"
+                    )
+                    << " um"
+                    << "\n  coupled displacement magnitude = "
+                    << Units::convert(
+                        coupled_target_displacement.norm(),
+                        "um"
+                    )
+                    << " um"
+                    << "\n  coupled-minus-legacy endpoint = ("
+                    << Units::convert(
+                        coupled_minus_legacy_position.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        coupled_minus_legacy_position.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        coupled_minus_legacy_position.z(),
+                        "um"
+                    )
+                    << ") um"
+                    << "\n  coupled-minus-legacy magnitude = "
+                    << Units::convert(
+                        coupled_minus_legacy_position.norm(),
+                        "um"
+                    )
+                    << " um";
+            }
 
             if(time == 0.0 && i < 4) {
                 LOG(WARNING)
