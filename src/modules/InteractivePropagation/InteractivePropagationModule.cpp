@@ -2293,23 +2293,44 @@ InteractivePropagationModule::propagate_together(Event* event,
                     substep_end - substep_start;
 
                 unsigned int active_groups_at_start = 0;
+                unsigned int exactly_active_groups_at_start = 0;
                 unsigned int newly_active_groups = 0;
 
-                for(const auto& charge_group :
-                    propagating_charges) {
+                std::vector<std::uint8_t> substep_source_active(
+                    propagating_charges.size(),
+                    0U
+                );
+
+                for(unsigned int source_index = 0;
+                    source_index < propagating_charges.size();
+                    source_index++) {
+
+                    const auto& charge_group =
+                        propagating_charges[source_index];
 
                     const double activation_time =
                         charge_group.getLocalTime();
 
-                    // A group is present throughout this substep when its
-                    // activation time lies at or numerically before the
-                    // merged substep boundary.
+                    // The merged substep mask is authoritative for the
+                    // future coupled RK4 calculation.
                     if(
                         activation_time
                         <= substep_start
                         + boundary_merge_tolerance
                     ) {
+                        substep_source_active[source_index] =
+                            1U;
+
                         active_groups_at_start++;
+                    }
+
+                    // Count the groups that would pass the old exact
+                    // deposition-time condition at this retained boundary.
+                    if(
+                        activation_time
+                        <= substep_start
+                    ) {
+                        exactly_active_groups_at_start++;
                     }
 
                     // Count groups represented by this merged boundary.
@@ -2351,7 +2372,95 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "\n  newly active groups = "
                     << newly_active_groups
                     << "\n  active groups during substep = "
-                    << active_groups_at_start;
+                    << active_groups_at_start
+                    << "\n  groups passing exact time gate = "
+                    << exactly_active_groups_at_start;
+
+                if(substep_index == 1) {
+
+                    constexpr unsigned int diagnostic_target_index =
+                        0U;
+
+                    const auto& diagnostic_target_position =
+                        previous_charge_locations[
+                            diagnostic_target_index
+                        ];
+
+                    const auto explicit_mask_field =
+                        coulomb_efield(
+                            substep_start,
+                            diagnostic_target_position,
+                            diagnostic_target_index,
+                            previous_charge_locations,
+                            previous_charge_states,
+                            substep_source_active,
+                            SourceActivationMode::EXPLICIT_MASK,
+                            false
+                        );
+
+                    const auto deposition_time_field =
+                        coulomb_efield(
+                            substep_start,
+                            diagnostic_target_position,
+                            diagnostic_target_index,
+                            previous_charge_locations,
+                            previous_charge_states,
+                            substep_source_active,
+                            SourceActivationMode::DEPOSITION_TIME,
+                            false
+                        );
+
+                    const auto activation_mode_difference =
+                        explicit_mask_field
+                        - deposition_time_field;
+
+                    LOG(WARNING)
+                        << "[COUPLED_RK4_ACTIVATION_MODE_CHECK]"
+                        << "\n  substep index = "
+                        << substep_index
+                        << "\n  evaluation time = "
+                        << std::setprecision(
+                            std::numeric_limits<double>::max_digits10
+                        )
+                        << Units::convert(
+                            substep_start,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  target group index = "
+                        << diagnostic_target_index
+                        << "\n  enabled by merged mask = "
+                        << active_groups_at_start
+                        << "\n  passing exact time gate = "
+                        << exactly_active_groups_at_start
+                        << "\n  explicit-mask field, internal = ("
+                        << explicit_mask_field.x()
+                        << ", "
+                        << explicit_mask_field.y()
+                        << ", "
+                        << explicit_mask_field.z()
+                        << ")"
+                        << "\n  deposition-time field, internal = ("
+                        << deposition_time_field.x()
+                        << ", "
+                        << deposition_time_field.y()
+                        << ", "
+                        << deposition_time_field.z()
+                        << ")"
+                        << "\n  field difference, internal = ("
+                        << activation_mode_difference.x()
+                        << ", "
+                        << activation_mode_difference.y()
+                        << ", "
+                        << activation_mode_difference.z()
+                        << ")"
+                        << "\n  field-difference magnitude = "
+                        << Units::convert(
+                            activation_mode_difference.norm(),
+                            "V/cm"
+                        )
+                        << " V/cm";
+                }
             }
         }
 
