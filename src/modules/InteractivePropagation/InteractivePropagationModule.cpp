@@ -931,6 +931,10 @@ InteractivePropagationModule::propagate_together(Event* event,
     // Temporary runtime diagnostics:
     bool coulomb_debug_first_pair_logged = false;
     bool coulomb_debug_first_cap_logged = false;
+    enum class SourceActivationMode : std::uint8_t {
+        DEPOSITION_TIME,
+        EXPLICIT_MASK
+    };
 
     // Numerical separation used only when two distinct charge groups occupy
     // exactly the same position. This preserves the previous regularization
@@ -1068,6 +1072,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<ROOT::Math::XYZPoint>& source_positions,
             const std::vector<allpix::CarrierState>& source_states,
             const std::vector<std::uint8_t>& source_active,
+            SourceActivationMode activation_mode,
             bool record_diagnostics)
             -> Eigen::Vector3d {
 
@@ -1160,8 +1165,10 @@ InteractivePropagationModule::propagate_together(Event* event,
             }
 
             if(
-                propagating_charges[i].getLocalTime()
-                > evaluation_time
+                activation_mode
+                    == SourceActivationMode::DEPOSITION_TIME
+                && propagating_charges[i].getLocalTime()
+                    > evaluation_time
             ) {
                 debug_sources_future++;
                 continue;
@@ -1557,6 +1564,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<ROOT::Math::XYZPoint>&,
             const std::vector<allpix::CarrierState>&,
             const std::vector<std::uint8_t>&,
+            SourceActivationMode,
             bool
         )
     > carrier_velocity_noB =
@@ -1567,6 +1575,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<ROOT::Math::XYZPoint>& source_positions,
             const std::vector<allpix::CarrierState>& source_states,
             const std::vector<std::uint8_t>& source_active,
+            SourceActivationMode activation_mode,
             bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
@@ -1593,6 +1602,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             source_positions,
             source_states,
             source_active,
+            activation_mode,
             record_coulomb_diagnostics
         );
 
@@ -1619,6 +1629,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<ROOT::Math::XYZPoint>&,
             const std::vector<allpix::CarrierState>&,
             const std::vector<std::uint8_t>&,
+            SourceActivationMode,
             bool
         )
     > carrier_velocity_withB =
@@ -1629,6 +1640,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<ROOT::Math::XYZPoint>& source_positions,
             const std::vector<allpix::CarrierState>& source_states,
             const std::vector<std::uint8_t>& source_active,
+            SourceActivationMode activation_mode,
             bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
@@ -1655,6 +1667,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             source_positions,
             source_states,
             source_active,
+            activation_mode,
             record_coulomb_diagnostics
         );
 
@@ -1779,6 +1792,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     previous_charge_locations,
                     previous_charge_states,
                     all_sources_enabled,
+                    SourceActivationMode::DEPOSITION_TIME,
                     true
                 );
             };
@@ -1797,6 +1811,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     previous_charge_locations,
                     previous_charge_states,
                     all_sources_enabled,
+                    SourceActivationMode::DEPOSITION_TIME,
                     true
                 );
             };
@@ -2393,6 +2408,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 previous_charge_locations,
                 previous_charge_states,
                 all_sources_enabled,
+                SourceActivationMode::DEPOSITION_TIME,
                 true
             );
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
