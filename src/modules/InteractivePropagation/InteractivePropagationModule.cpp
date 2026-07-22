@@ -50,6 +50,13 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
     config_.setDefault<double>("coulomb_distance_limit", Units::get(200.0,"um"));
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); 
+    // Diagnostic-only minimum pair separation used during the
+    // coupled-RK4 timestep-refinement sweep. A value of zero
+    // preserves the existing exact-overlap-only behavior.
+    config_.setDefault<double>(
+        "coulomb_refinement_core_distance",
+        Units::get(5.0, "nm")
+    );
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
     config_.setDefault<double>("output_propagation_summary_step", config_.get<double>("timestep"));
@@ -943,6 +950,9 @@ InteractivePropagationModule::propagate_together(Event* event,
         std::uint64_t overlap_regularizations = 0U;
         std::uint64_t capped_overlap_pairs = 0U;
 
+        std::uint64_t
+            refinement_core_substitutions = 0U;
+
         std::uint64_t nonoverlap_pairs = 0U;
         std::uint64_t capped_nonoverlap_pairs = 0U;
 
@@ -982,6 +992,24 @@ InteractivePropagationModule::propagate_together(Event* event,
     // distance while making the field evaluation deterministic.
     const double overlap_distance =
         std::sqrt(1e-15); // Internal distance unit: mm
+
+    // Applied only while active_refinement_statistics is non-null,
+    // meaning only during the factor-1 ... factor-1024 shadow sweep.
+    const double refinement_core_distance =
+        config_.get<double>(
+            "coulomb_refinement_core_distance"
+        );
+
+    if(refinement_core_distance < 0.0) {
+        throw ModuleError(
+            "coulomb_refinement_core_distance "
+            "cannot be negative"
+        );
+    }
+
+    const double refinement_core_distance_squared =
+        refinement_core_distance
+        * refinement_core_distance;
 
     // SplitMix64 is used only to construct stable pair-dependent directions.
     // It does not modify the event random-number engine.
@@ -1230,15 +1258,35 @@ InteractivePropagationModule::propagate_together(Event* event,
                 continue;
             }
 
-            // Detect an exact overlap between two distinct charge groups.
-            // Do not modify the physical source position here: mirror-charge
-            // calculations should continue to use the actual source position.
+            // Keep the actual physical pair separation available even when
+            // the refinement-only core later substitutes an effective vector.
             local_position =
                 source_positions[i];
 
+            const ROOT::Math::XYZVector
+                physical_dist_vector =
+                    point - local_position;
+
+            const double physical_dist_mag2 =
+                physical_dist_vector.Mag2();
+
+            const double physical_dist_mag =
+                physical_dist_mag2 > 0.0
+                    ? ROOT::Math::sqrt(
+                        physical_dist_mag2
+                    )
+                    : 0.0;
+
             const bool source_overlaps_target =
                 target_index != i
-                && local_position == point;
+                && physical_dist_mag2 == 0.0;
+
+            const bool source_inside_refinement_core =
+                target_index != i
+                && active_refinement_statistics != nullptr
+                && refinement_core_distance > 0.0
+                && physical_dist_mag2
+                    < refinement_core_distance_squared;
 
             if(source_overlaps_target) {
                 debug_sources_overlapping++;
@@ -1254,15 +1302,42 @@ InteractivePropagationModule::propagate_together(Event* event,
                 debug_sources_self++;
             } else {
 
-                if(source_overlaps_target) {
+                if(source_inside_refinement_core) {
+
+                    // Inside the diagnostic refinement core, use one stable
+                    // pair-dependent direction and enforce the configured
+                    // separation magnitude. This prevents the direction from
+                    // reversing when an electron-hole pair crosses through zero.
                     dist_vector =
                         deterministic_overlap_separation(
                             target_index,
                             i
                         );
-                } else {
+
                     dist_vector =
-                        point - local_position;
+                        dist_vector
+                        * (
+                            refinement_core_distance
+                            / overlap_distance
+                        );
+
+                    active_refinement_statistics
+                        ->refinement_core_substitutions++;
+
+                } else if(source_overlaps_target) {
+
+                    // Preserve the current exact-overlap behavior when the
+                    // refinement core is disabled.
+                    dist_vector =
+                        deterministic_overlap_separation(
+                            target_index,
+                            i
+                        );
+
+                } else {
+
+                    dist_vector =
+                        physical_dist_vector;
                 }
 
                 dist_mag2 =
@@ -1339,7 +1414,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             statistics.minimum_nonzero_separation =
                                 std::min(
                                     statistics.minimum_nonzero_separation,
-                                    dist_mag
+                                    physical_dist_mag
                                 );
 
                             statistics.maximum_uncapped_nonoverlap_field =
@@ -4621,6 +4696,15 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "[COUPLED_RK4_COULOMB_REFINEMENT_STATS]"
                     << "\n  refinement factor = "
                     << refinement_factor
+                    << "\n  refinement core distance = "
+                    << Units::convert(
+                        refinement_core_distance,
+                        "nm"
+                    )
+                    << " nm"
+                    << "\n  refinement core substitutions = "
+                    << refinement_statistics
+                        .refinement_core_substitutions
                     << "\n  field evaluations = "
                     << refinement_statistics.field_evaluations
                     << "\n  eligible direct pair evaluations = "
