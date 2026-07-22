@@ -921,6 +921,7 @@ InteractivePropagationModule::propagate_together(Event* event,
     std::vector<ROOT::Math::XYZPoint> previous_charge_locations; // Positions of each charge at the previous time step (only updated once at the end of each timestep)
     std::vector<double> charge_times; // Most recent time for all of the charges (by the end of propagation they should all be aligned)
     std::vector<allpix::CarrierState> charge_states; // The state of propagation of each charge group (whether it's propagated, trapped, or halted)
+    std::vector<allpix::CarrierState> previous_charge_states; // States frozen at the beginning of the current outer timestep. These are used for all Coulomb evaluations during that timestep.
     double_t time = 0; // The current time threshold (we only propagate charges near this time)
 
     // Temporary diagnostic counter:
@@ -1751,7 +1752,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     charge_type,
                     i,
                     previous_charge_locations,
-                    charge_states,
+                    previous_charge_states,
                     true
                 );
             };
@@ -1768,7 +1769,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     charge_type,
                     i,
                     previous_charge_locations,
-                    charge_states,
+                    previous_charge_states,
                     true
                 );
             };
@@ -1808,6 +1809,10 @@ InteractivePropagationModule::propagate_together(Event* event,
         );
 
         charge_states.push_back(
+            charge.getState()
+        );
+
+        previous_charge_states.push_back(
             charge.getState()
         );
 
@@ -2115,9 +2120,18 @@ InteractivePropagationModule::propagate_together(Event* event,
                                             max_z_h);
         }
 
-        // Copy the current positions to the previous positions
-        for (unsigned int i = 0; i < charge_locations.size(); i++){
-            previous_charge_locations[i] = charge_locations[i];   
+        // Freeze the source state used by all Coulomb evaluations during
+        // this outer timestep. This prevents the result from depending on
+        // the order in which target groups are propagated.
+        for(unsigned int i = 0;
+            i < charge_locations.size();
+            i++) {
+
+            previous_charge_locations[i] =
+                charge_locations[i];
+
+            previous_charge_states[i] =
+                charge_states[i];
         }
 
         // Move all charges by a single timestep
@@ -2171,7 +2185,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 position,
                 i,
                 previous_charge_locations,
-                charge_states,
+                previous_charge_states,
                 true
             );
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
