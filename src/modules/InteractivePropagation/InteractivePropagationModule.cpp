@@ -936,6 +936,47 @@ InteractivePropagationModule::propagate_together(Event* event,
         EXPLICIT_MASK
     };
 
+    struct CoulombRefinementStatistics {
+        std::uint64_t field_evaluations = 0U;
+        std::uint64_t eligible_direct_pairs = 0U;
+
+        std::uint64_t overlap_regularizations = 0U;
+        std::uint64_t capped_overlap_pairs = 0U;
+
+        std::uint64_t nonoverlap_pairs = 0U;
+        std::uint64_t capped_nonoverlap_pairs = 0U;
+
+        std::uint64_t summed_fields_above_pair_cap = 0U;
+
+        double minimum_nonzero_separation =
+            std::numeric_limits<double>::infinity();
+
+        double maximum_uncapped_overlap_field = 0.0;
+        double maximum_uncapped_nonoverlap_field = 0.0;
+        double maximum_summed_field = 0.0;
+
+        bool have_first_overlap_pair = false;
+
+        unsigned int first_overlap_target_index = 0U;
+        unsigned int first_overlap_source_index = 0U;
+
+        Eigen::Vector3d first_overlap_separation =
+            Eigen::Vector3d::Zero();
+
+        bool have_first_target_k1 = false;
+
+        double first_target_substep_size = 0.0;
+
+        Eigen::Vector3d first_target_k1_velocity =
+            Eigen::Vector3d::Zero();
+
+        Eigen::Vector3d first_target_stage2_displacement =
+            Eigen::Vector3d::Zero();
+    };
+
+    CoulombRefinementStatistics*
+        active_refinement_statistics = nullptr;
+
     // Numerical separation used only when two distinct charge groups occupy
     // exactly the same position. This preserves the previous regularization
     // distance while making the field evaluation deterministic.
@@ -1145,6 +1186,11 @@ InteractivePropagationModule::propagate_together(Event* event,
             );
         }
 
+        if(active_refinement_statistics != nullptr) {
+            active_refinement_statistics
+                ->field_evaluations++;
+        }
+
         for(unsigned int i = 0; i < source_positions.size(); i++) {
 
             // TODO: Add check with (oc)tree object that only looks at charges within a certain distance
@@ -1241,6 +1287,72 @@ InteractivePropagationModule::propagate_together(Event* event,
                         / relative_permittivity_
                         * static_cast<double>(q)
                         / dist_mag2;
+                    
+                    if(active_refinement_statistics != nullptr) {
+
+                        auto& statistics =
+                            *active_refinement_statistics;
+
+                        statistics.eligible_direct_pairs++;
+
+                        const bool cap_applied =
+                            uncapped_interaction_magnitude
+                            > coulomb_field_limit_;
+
+                        if(source_overlaps_target) {
+
+                            statistics.overlap_regularizations++;
+
+                            statistics.maximum_uncapped_overlap_field =
+                                std::max(
+                                    statistics.maximum_uncapped_overlap_field,
+                                    uncapped_interaction_magnitude
+                                );
+
+                            if(cap_applied) {
+                                statistics.capped_overlap_pairs++;
+                            }
+
+                            if(!statistics.have_first_overlap_pair) {
+
+                                statistics.have_first_overlap_pair =
+                                    true;
+
+                                statistics.first_overlap_target_index =
+                                    target_index;
+
+                                statistics.first_overlap_source_index =
+                                    i;
+
+                                statistics.first_overlap_separation =
+                                    Eigen::Vector3d(
+                                        dist_vector.x(),
+                                        dist_vector.y(),
+                                        dist_vector.z()
+                                    );
+                            }
+
+                        } else {
+
+                            statistics.nonoverlap_pairs++;
+
+                            statistics.minimum_nonzero_separation =
+                                std::min(
+                                    statistics.minimum_nonzero_separation,
+                                    dist_mag
+                                );
+
+                            statistics.maximum_uncapped_nonoverlap_field =
+                                std::max(
+                                    statistics.maximum_uncapped_nonoverlap_field,
+                                    uncapped_interaction_magnitude
+                                );
+
+                            if(cap_applied) {
+                                statistics.capped_nonoverlap_pairs++;
+                            }
+                        }
+                    }
 
                     interaction_magnitude =
                         std::min(
@@ -1427,6 +1539,31 @@ InteractivePropagationModule::propagate_together(Event* event,
             if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
                 dist_mag = ROOT::Math::sqrt(dist_mag2);
                 field = field - dist_vector / dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
+            }
+        }
+
+        if(active_refinement_statistics != nullptr) {
+
+            auto& statistics =
+                *active_refinement_statistics;
+
+            const double summed_field_magnitude =
+                std::sqrt(
+                    field.Mag2()
+                );
+
+            statistics.maximum_summed_field =
+                std::max(
+                    statistics.maximum_summed_field,
+                    summed_field_magnitude
+                );
+
+            if(
+                summed_field_magnitude
+                > coulomb_field_limit_
+            ) {
+                statistics
+                    .summed_fields_above_pair_cap++;
             }
         }
 
@@ -2416,6 +2553,30 @@ InteractivePropagationModule::propagate_together(Event* event,
                             i,
                             initial_positions
                         );
+
+                    if(
+                        active_refinement_statistics != nullptr
+                        && i == 0U
+                        && !active_refinement_statistics
+                            ->have_first_target_k1
+                    ) {
+                        auto& statistics =
+                            *active_refinement_statistics;
+
+                        statistics.have_first_target_k1 =
+                            true;
+
+                        statistics.first_target_substep_size =
+                            substep_size;
+
+                        statistics.first_target_k1_velocity =
+                            k1[i];
+
+                        statistics.first_target_stage2_displacement =
+                            0.5
+                            * substep_size
+                            * k1[i];
+                    }
 
                     const auto initial_position =
                         convertPointToVector(
@@ -4003,7 +4164,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     128U,
                     256U,
                     512U,
-                    1024,
+                    1024U,
                 };
 
             // The factor-1 calculation should reproduce the existing
@@ -4022,6 +4183,12 @@ InteractivePropagationModule::propagate_together(Event* event,
 
                 auto refined_positions =
                     previous_charge_locations;
+
+                CoulombRefinementStatistics
+                    refinement_statistics;
+
+                active_refinement_statistics =
+                    &refinement_statistics;
 
                 unsigned int
                     refined_substeps_advanced = 0U;
@@ -4138,6 +4305,9 @@ InteractivePropagationModule::propagate_together(Event* event,
 
                 unsigned int
                     refinement_groups_compared = 0U;
+
+                active_refinement_statistics =
+                    nullptr;
 
                 unsigned int
                     refinement_nonfinite_groups = 0U;
@@ -4385,7 +4555,198 @@ InteractivePropagationModule::propagate_together(Event* event,
                         "um"
                     )
                     << " um";
+                
+                const std::uint64_t capped_direct_pairs =
+                    refinement_statistics.capped_overlap_pairs
+                    + refinement_statistics.capped_nonoverlap_pairs;
 
+                const double capped_direct_fraction =
+                    refinement_statistics.eligible_direct_pairs > 0U
+                        ? static_cast<double>(
+                            capped_direct_pairs
+                        )
+                        / static_cast<double>(
+                            refinement_statistics.eligible_direct_pairs
+                        )
+                        : 0.0;
+
+                const double capped_overlap_fraction =
+                    refinement_statistics.overlap_regularizations > 0U
+                        ? static_cast<double>(
+                            refinement_statistics.capped_overlap_pairs
+                        )
+                        / static_cast<double>(
+                            refinement_statistics.overlap_regularizations
+                        )
+                        : 0.0;
+
+                const double capped_nonoverlap_fraction =
+                    refinement_statistics.nonoverlap_pairs > 0U
+                        ? static_cast<double>(
+                            refinement_statistics.capped_nonoverlap_pairs
+                        )
+                        / static_cast<double>(
+                            refinement_statistics.nonoverlap_pairs
+                        )
+                        : 0.0;
+
+                const double eligible_pairs_per_field_evaluation =
+                    refinement_statistics.field_evaluations > 0U
+                        ? static_cast<double>(
+                            refinement_statistics.eligible_direct_pairs
+                        )
+                        / static_cast<double>(
+                            refinement_statistics.field_evaluations
+                        )
+                        : 0.0;
+
+                const double summed_above_cap_fraction =
+                    refinement_statistics.field_evaluations > 0U
+                        ? static_cast<double>(
+                            refinement_statistics
+                                .summed_fields_above_pair_cap
+                        )
+                        / static_cast<double>(
+                            refinement_statistics.field_evaluations
+                        )
+                        : 0.0;
+
+                const bool have_nonoverlap_separation =
+                    std::isfinite(
+                        refinement_statistics
+                            .minimum_nonzero_separation
+                    );
+
+                LOG(WARNING)
+                    << "[COUPLED_RK4_COULOMB_REFINEMENT_STATS]"
+                    << "\n  refinement factor = "
+                    << refinement_factor
+                    << "\n  field evaluations = "
+                    << refinement_statistics.field_evaluations
+                    << "\n  eligible direct pair evaluations = "
+                    << refinement_statistics.eligible_direct_pairs
+                    << "\n  eligible pairs per field evaluation = "
+                    << eligible_pairs_per_field_evaluation
+                    << "\n  exact-overlap regularizations = "
+                    << refinement_statistics.overlap_regularizations
+                    << "\n  capped exact-overlap pairs = "
+                    << refinement_statistics.capped_overlap_pairs
+                    << "\n  capped overlap fraction = "
+                    << capped_overlap_fraction
+                    << "\n  non-overlap pair evaluations = "
+                    << refinement_statistics.nonoverlap_pairs
+                    << "\n  capped non-overlap pairs = "
+                    << refinement_statistics.capped_nonoverlap_pairs
+                    << "\n  capped non-overlap fraction = "
+                    << capped_nonoverlap_fraction
+                    << "\n  all capped direct pairs = "
+                    << capped_direct_pairs
+                    << "\n  all capped direct-pair fraction = "
+                    << capped_direct_fraction
+                    << "\n  have non-overlap separation = "
+                    << have_nonoverlap_separation
+                    << "\n  minimum non-overlap separation = "
+                    << Units::convert(
+                        have_nonoverlap_separation
+                            ? refinement_statistics
+                                .minimum_nonzero_separation
+                            : 0.0,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  maximum uncapped overlap field = "
+                    << Units::convert(
+                        refinement_statistics
+                            .maximum_uncapped_overlap_field,
+                        "V/cm"
+                    )
+                    << " V/cm"
+                    << "\n  maximum uncapped non-overlap field = "
+                    << Units::convert(
+                        refinement_statistics
+                            .maximum_uncapped_nonoverlap_field,
+                        "V/cm"
+                    )
+                    << " V/cm"
+                    << "\n  maximum summed Coulomb field = "
+                    << Units::convert(
+                        refinement_statistics
+                            .maximum_summed_field,
+                        "V/cm"
+                    )
+                    << " V/cm"
+                    << "\n  summed fields above pair cap = "
+                    << refinement_statistics
+                        .summed_fields_above_pair_cap
+                    << "\n  summed-field-above-cap fraction = "
+                    << summed_above_cap_fraction
+                    << "\n  first overlap pair found = "
+                    << refinement_statistics
+                        .have_first_overlap_pair
+                    << "\n  first overlap target index = "
+                    << refinement_statistics
+                        .first_overlap_target_index
+                    << "\n  first overlap source index = "
+                    << refinement_statistics
+                        .first_overlap_source_index
+                    << "\n  first overlap separation = ("
+                    << Units::convert(
+                        refinement_statistics
+                            .first_overlap_separation.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refinement_statistics
+                            .first_overlap_separation.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refinement_statistics
+                            .first_overlap_separation.z(),
+                        "um"
+                    )
+                    << ") um"
+                    << "\n  first target K1 recorded = "
+                    << refinement_statistics
+                        .have_first_target_k1
+                    << "\n  first target substep size = "
+                    << Units::convert(
+                        refinement_statistics
+                            .first_target_substep_size,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  first target K1 velocity, internal = ("
+                    << refinement_statistics
+                        .first_target_k1_velocity.x()
+                    << ", "
+                    << refinement_statistics
+                        .first_target_k1_velocity.y()
+                    << ", "
+                    << refinement_statistics
+                        .first_target_k1_velocity.z()
+                    << ")"
+                    << "\n  first target stage-2 displacement = ("
+                    << Units::convert(
+                        refinement_statistics
+                            .first_target_stage2_displacement.x(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refinement_statistics
+                            .first_target_stage2_displacement.y(),
+                        "um"
+                    )
+                    << ", "
+                    << Units::convert(
+                        refinement_statistics
+                            .first_target_stage2_displacement.z(),
+                        "um"
+                    )
+                    << ") um";
                 previous_refinement_positions =
                     std::move(
                         refined_positions
