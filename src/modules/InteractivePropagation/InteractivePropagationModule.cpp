@@ -4269,7 +4269,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     32U,
                     64U,
                     128U,
-                    256U
+                    256U,
                     512U,
                     1024U,
                     2048U,
