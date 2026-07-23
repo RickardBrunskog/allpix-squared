@@ -4326,12 +4326,6 @@ InteractivePropagationModule::propagate_together(Event* event,
                         refinement_factor
                     );
 
-                const double max_shadow_substep =
-                    timestep_
-                    / static_cast<double>(
-                        refinement_factor
-                    );
-
                 auto refined_positions =
                     previous_charge_locations;
 
