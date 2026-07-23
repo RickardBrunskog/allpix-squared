@@ -4262,24 +4262,16 @@ InteractivePropagationModule::propagate_together(Event* event,
             // retaining every merged charge-activation boundary.
             const std::vector<unsigned int>
                 refinement_factors = {
-                    1U,
-                    2U,
-                    4U,
-                    8U,
-                    16U,
-                    32U,
-                    64U,
-                    128U,
-                    256U,
-                    512U,
-                    1024U,
+                    512U, 
+                    1024U, 
+                    2048U
                 };
 
-            // The previous endpoint initially contains the original no-core
-            // sequential shadow. With a nonzero diagnostic kernel, the factor-1
-            // difference therefore measures both the kernel change and the coarse
-            // timestep effect. Factors 2 and above compare adjacent refinements
-            // using the same diagnostic kernel.
+            // The previous endpoint initially contains the unsoftened
+            // sequential shadow. Because the first requested factor is 512,
+            // the factor-512 difference is NOT an adjacent softened
+            // convergence comparison. The 512->1024 and 1024->2048
+            // differences compare the same softened model.
             auto previous_refinement_positions =
                 sequential_shadow_positions;
 
@@ -4439,6 +4431,55 @@ InteractivePropagationModule::propagate_together(Event* event,
                     previous_endpoint_max_difference =
                         0.0;
 
+                struct EndpointErrorRecord {
+                    unsigned int group_index;
+                    allpix::CarrierType carrier_type;
+                    unsigned int charge;
+                    double local_time;
+
+                    Eigen::Vector3d initial_position;
+                    Eigen::Vector3d previous_position;
+                    Eigen::Vector3d current_position;
+                    Eigen::Vector3d difference;
+
+                    double magnitude;
+                };
+
+                std::vector<EndpointErrorRecord> endpoint_errors;
+                endpoint_errors.reserve(propagating_charges.size());
+
+                const double error_threshold_1_nm =
+                    Units::get(1.0, "nm");
+                const double error_threshold_10_nm =
+                    Units::get(10.0, "nm");
+                const double error_threshold_50_nm =
+                    Units::get(50.0, "nm");
+                const double error_threshold_100_nm =
+                    Units::get(100.0, "nm");
+                const double error_threshold_500_nm =
+                    Units::get(500.0, "nm");
+
+                std::uint64_t endpoint_errors_above_1_nm = 0U;
+                std::uint64_t endpoint_errors_above_10_nm = 0U;
+                std::uint64_t endpoint_errors_above_50_nm = 0U;
+                std::uint64_t endpoint_errors_above_100_nm = 0U;
+                std::uint64_t endpoint_errors_above_500_nm = 0U;
+
+                std::uint64_t electron_groups_compared = 0U;
+                std::uint64_t hole_groups_compared = 0U;
+
+                double electron_error_squared_sum = 0.0;
+                double hole_error_squared_sum = 0.0;
+
+                double charge_weighted_error_squared_sum = 0.0;
+                double total_charge_compared = 0.0;
+
+                double electron_charge_weighted_error_squared_sum = 0.0;
+                double electron_charge_compared = 0.0;
+
+                double hole_charge_weighted_error_squared_sum = 0.0;
+                double hole_charge_compared = 0.0;
+
                 for(unsigned int group_index = 0;
                     group_index
                         < propagating_charges.size();
@@ -4490,21 +4531,31 @@ InteractivePropagationModule::propagate_together(Event* event,
                         continue;
                     }
 
+                    const Eigen::Vector3d displacement_vector =
+                        refined_position - initial_position;
+
+                    const Eigen::Vector3d endpoint_difference_vector =
+                        refined_position - previous_refinement_position;
+
                     const double displacement =
-                        (
-                            refined_position
-                            - initial_position
-                        ).norm();
+                        displacement_vector.norm();
 
                     const double endpoint_difference =
-                        (
-                            refined_position
-                            - previous_refinement_position
-                        ).norm();
+                        endpoint_difference_vector.norm();
+
+                    const auto& charge_group =
+                        propagating_charges[group_index];
+
+                    const auto carrier_type =
+                        charge_group.getType();
+
+                    const double group_charge =
+                        static_cast<double>(
+                            charge_group.getCharge()
+                        );
 
                     refinement_displacement_squared_sum +=
-                        displacement
-                        * displacement;
+                        displacement * displacement;
 
                     refinement_max_displacement =
                         std::max(
@@ -4513,14 +4564,78 @@ InteractivePropagationModule::propagate_together(Event* event,
                         );
 
                     previous_endpoint_difference_squared_sum +=
-                        endpoint_difference
-                        * endpoint_difference;
+                        endpoint_difference * endpoint_difference;
 
                     previous_endpoint_max_difference =
                         std::max(
                             previous_endpoint_max_difference,
                             endpoint_difference
                         );
+
+                    charge_weighted_error_squared_sum +=
+                        group_charge
+                        * endpoint_difference
+                        * endpoint_difference;
+
+                    total_charge_compared += group_charge;
+
+                    if(endpoint_difference > error_threshold_1_nm) {
+                        endpoint_errors_above_1_nm++;
+                    }
+                    if(endpoint_difference > error_threshold_10_nm) {
+                        endpoint_errors_above_10_nm++;
+                    }
+                    if(endpoint_difference > error_threshold_50_nm) {
+                        endpoint_errors_above_50_nm++;
+                    }
+                    if(endpoint_difference > error_threshold_100_nm) {
+                        endpoint_errors_above_100_nm++;
+                    }
+                    if(endpoint_difference > error_threshold_500_nm) {
+                        endpoint_errors_above_500_nm++;
+                    }
+
+                    if(carrier_type == CarrierType::ELECTRON) {
+                        electron_groups_compared++;
+
+                        electron_error_squared_sum +=
+                            endpoint_difference
+                            * endpoint_difference;
+
+                        electron_charge_weighted_error_squared_sum +=
+                            group_charge
+                            * endpoint_difference
+                            * endpoint_difference;
+
+                        electron_charge_compared += group_charge;
+                    } else if(carrier_type == CarrierType::HOLE) {
+                        hole_groups_compared++;
+
+                        hole_error_squared_sum +=
+                            endpoint_difference
+                            * endpoint_difference;
+
+                        hole_charge_weighted_error_squared_sum +=
+                            group_charge
+                            * endpoint_difference
+                            * endpoint_difference;
+
+                        hole_charge_compared += group_charge;
+                    }
+
+                    endpoint_errors.push_back(
+                        EndpointErrorRecord{
+                            group_index,
+                            carrier_type,
+                            charge_group.getCharge(),
+                            charge_group.getLocalTime(),
+                            initial_position,
+                            previous_refinement_position,
+                            refined_position,
+                            endpoint_difference_vector,
+                            endpoint_difference
+                        }
+                    );
 
                     refinement_groups_compared++;
                 }
@@ -4545,6 +4660,59 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 )
                             )
                             : 0.0;
+
+                const auto rms_from_sum =
+                    [](const double squared_sum,
+                    const double denominator) {
+                        return denominator > 0.0
+                            ? std::sqrt(
+                                squared_sum / denominator
+                            )
+                            : 0.0;
+                    };
+
+                const double charge_weighted_endpoint_rms =
+                    rms_from_sum(
+                        charge_weighted_error_squared_sum,
+                        total_charge_compared
+                    );
+
+                const double electron_endpoint_rms =
+                    rms_from_sum(
+                        electron_error_squared_sum,
+                        static_cast<double>(
+                            electron_groups_compared
+                        )
+                    );
+
+                const double hole_endpoint_rms =
+                    rms_from_sum(
+                        hole_error_squared_sum,
+                        static_cast<double>(
+                            hole_groups_compared
+                        )
+                    );
+
+                const double electron_charge_weighted_endpoint_rms =
+                    rms_from_sum(
+                        electron_charge_weighted_error_squared_sum,
+                        electron_charge_compared
+                    );
+
+                const double hole_charge_weighted_endpoint_rms =
+                    rms_from_sum(
+                        hole_charge_weighted_error_squared_sum,
+                        hole_charge_compared
+                    );
+
+                std::sort(
+                    endpoint_errors.begin(),
+                    endpoint_errors.end(),
+                    [](const EndpointErrorRecord& left,
+                    const EndpointErrorRecord& right) {
+                        return left.magnitude > right.magnitude;
+                    }
+                );
 
                 const Eigen::Vector3d
                     refined_target_position =
@@ -4572,10 +4740,24 @@ InteractivePropagationModule::propagate_together(Event* event,
                         refined_target_position
                         - previous_target_position;
 
+                const std::string comparison_reference =
+                    refinement_factor
+                            == refinement_factors.front()
+                        ? "unsoftened sequential shadow; "
+                        "NOT an adjacent softened comparison"
+                        : std::string(
+                            "softened refinement factor "
+                        )
+                            + std::to_string(
+                                    refinement_factor / 2U
+                                );
+
                 LOG(WARNING)
                     << "[COUPLED_RK4_TIMESTEP_REFINEMENT]"
                     << "\n  refinement factor = "
                     << refinement_factor
+                    << "\n  comparison reference = "
+                    << comparison_reference
                     << "\n  requested maximum substep = "
                     << std::setprecision(
                         std::numeric_limits<double>::
@@ -4666,6 +4848,170 @@ InteractivePropagationModule::propagate_together(Event* event,
                         "um"
                     )
                     << " um";
+                LOG(WARNING)
+                    << "[COUPLED_RK4_ENDPOINT_ERROR_SUMMARY]"
+                    << "\n  refinement factor = "
+                    << refinement_factor
+                    << "\n  comparison reference = "
+                    << comparison_reference
+                    << "\n  groups compared = "
+                    << refinement_groups_compared
+                    << "\n  unweighted RMS endpoint error = "
+                    << Units::convert(
+                        previous_endpoint_rms_difference,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  charge-weighted RMS endpoint error = "
+                    << Units::convert(
+                        charge_weighted_endpoint_rms,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  electron groups compared = "
+                    << electron_groups_compared
+                    << "\n  electron unweighted RMS endpoint error = "
+                    << Units::convert(
+                        electron_endpoint_rms,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  electron charge-weighted RMS endpoint error = "
+                    << Units::convert(
+                        electron_charge_weighted_endpoint_rms,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  hole groups compared = "
+                    << hole_groups_compared
+                    << "\n  hole unweighted RMS endpoint error = "
+                    << Units::convert(
+                        hole_endpoint_rms,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  hole charge-weighted RMS endpoint error = "
+                    << Units::convert(
+                        hole_charge_weighted_endpoint_rms,
+                        "um"
+                    )
+                    << " um"
+                    << "\n  errors above 1 nm = "
+                    << endpoint_errors_above_1_nm
+                    << "\n  errors above 10 nm = "
+                    << endpoint_errors_above_10_nm
+                    << "\n  errors above 50 nm = "
+                    << endpoint_errors_above_50_nm
+                    << "\n  errors above 100 nm = "
+                    << endpoint_errors_above_100_nm
+                    << "\n  errors above 500 nm = "
+                    << endpoint_errors_above_500_nm;
+
+                const std::size_t number_of_top_errors =
+                    std::min<std::size_t>(
+                        10U,
+                        endpoint_errors.size()
+                    );
+
+                for(std::size_t rank = 0;
+                    rank < number_of_top_errors;
+                    rank++) {
+
+                    const auto& error =
+                        endpoint_errors[rank];
+
+                    LOG(WARNING)
+                        << "[COUPLED_RK4_ENDPOINT_ERROR_TOP]"
+                        << "\n  refinement factor = "
+                        << refinement_factor
+                        << "\n  comparison reference = "
+                        << comparison_reference
+                        << "\n  rank = "
+                        << rank + 1U
+                        << "\n  group index = "
+                        << error.group_index
+                        << "\n  carrier type = "
+                        << error.carrier_type
+                        << "\n  group charge = "
+                        << error.charge
+                        << " e"
+                        << "\n  deposition local time = "
+                        << Units::convert(
+                            error.local_time,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  outer-step initial position = ("
+                        << Units::convert(
+                            error.initial_position.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.initial_position.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.initial_position.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  previous endpoint = ("
+                        << Units::convert(
+                            error.previous_position.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.previous_position.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.previous_position.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  current endpoint = ("
+                        << Units::convert(
+                            error.current_position.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.current_position.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.current_position.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  endpoint difference vector = ("
+                        << Units::convert(
+                            error.difference.x(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.difference.y(),
+                            "um"
+                        )
+                        << ", "
+                        << Units::convert(
+                            error.difference.z(),
+                            "um"
+                        )
+                        << ") um"
+                        << "\n  endpoint difference magnitude = "
+                        << Units::convert(
+                            error.magnitude,
+                            "um"
+                        )
+                        << " um";
+                }
                 
                 const std::uint64_t capped_direct_pairs =
                     refinement_statistics.capped_overlap_pairs
