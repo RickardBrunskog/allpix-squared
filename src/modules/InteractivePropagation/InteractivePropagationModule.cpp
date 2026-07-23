@@ -4258,27 +4258,66 @@ InteractivePropagationModule::propagate_together(Event* event,
                 )
                 << " um";
 
-                        // Test convergence of the coupled deterministic endpoint while
+            // Test convergence of the coupled deterministic endpoint while
             // retaining every merged charge-activation boundary.
             const std::vector<unsigned int>
                 refinement_factors = {
-                    512U, 
-                    1024U, 
+                    512U,
+                    1024U,
                     2048U,
                     4096U,
                     8192U
                 };
 
+            // Construct all refinement levels by subdividing the factor-512
+            // interval grid. This ensures that even very short activation
+            // intervals are refined at every subsequent level.
+            const unsigned int base_refinement_factor =
+                refinement_factors.front();
+
+            const double base_max_shadow_substep =
+                timestep_
+                / static_cast<double>(
+                    base_refinement_factor
+                );
+
+            // Every refinement factor must be an integer multiple of the
+            // base factor so that the interval grids remain nested.
+            for(const auto refinement_factor :
+                refinement_factors) {
+
+                if(
+                    refinement_factor < base_refinement_factor
+                    || refinement_factor
+                        % base_refinement_factor
+                        != 0U
+                ) {
+                    throw ModuleError(
+                        "RK4 refinement factor is not an integer "
+                        "multiple of the base refinement factor"
+                    );
+                }
+            }
+
             // The previous endpoint initially contains the unsoftened
-            // sequential shadow. Because the first requested factor is 512,
-            // the factor-512 difference is NOT an adjacent softened
-            // convergence comparison. The 512->1024 and 1024->2048
-            // differences compare the same softened model.
+            // sequential shadow. The factor-512 result is therefore NOT an
+            // adjacent softened convergence comparison. All later entries
+            // compare adjacent softened calculations on nested grids.
             auto previous_refinement_positions =
                 sequential_shadow_positions;
 
             for(const auto refinement_factor :
                 refinement_factors) {
+
+                const unsigned int refinement_multiplier =
+                    refinement_factor
+                    / base_refinement_factor;
+
+                const double max_shadow_substep =
+                    timestep_
+                    / static_cast<double>(
+                        refinement_factor
+                    );
 
                 const double max_shadow_substep =
                     timestep_
@@ -4327,6 +4366,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             propagating_charges.size(),
                             0U
                         );
+                    unsigned int interval_active_groups = 0U;
 
                     for(unsigned int source_index = 0;
                         source_index
@@ -4343,20 +4383,78 @@ InteractivePropagationModule::propagate_together(Event* event,
                             interval_active_mask[
                                 source_index
                             ] = 1U;
+
+                            interval_active_groups++;
                         }
                     }
 
-                    const unsigned int
-                        number_of_pieces =
-                            std::max(
-                                1U,
-                                static_cast<unsigned int>(
-                                    std::ceil(
-                                        interval_size
-                                        / max_shadow_substep
-                                    )
+                    // First determine the factor-512 subdivision of this
+                    // activation interval.
+                    const unsigned int base_number_of_pieces =
+                        std::max(
+                            1U,
+                            static_cast<unsigned int>(
+                                std::ceil(
+                                    interval_size
+                                    / base_max_shadow_substep
                                 )
-                            );
+                            )
+                        );
+
+                    // Every finer level subdivides each base-grid piece by an
+                    // integer multiplier. This makes all refinement grids nested,
+                    // including intervals shorter than the nominal timestep.
+                    const unsigned int number_of_pieces =
+                        base_number_of_pieces
+                        * refinement_multiplier;
+
+                    const double interval_piece_size =
+                        interval_size
+                        / static_cast<double>(
+                            number_of_pieces
+                        );
+
+                    LOG(WARNING)
+                        << "[COUPLED_RK4_REFINEMENT_INTERVAL]"
+                        << std::setprecision(
+                            std::numeric_limits<double>::max_digits10
+                        )
+                        << "\n  refinement factor = "
+                        << refinement_factor
+                        << "\n  interval index = "
+                        << interval_index
+                        << "\n  interval start = "
+                        << Units::convert(
+                            interval_start,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  interval end = "
+                        << Units::convert(
+                            interval_end,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  interval duration = "
+                        << Units::convert(
+                            interval_size,
+                            "ns"
+                        )
+                        << " ns"
+                        << "\n  active groups = "
+                        << interval_active_groups
+                        << "\n  base number of pieces = "
+                        << base_number_of_pieces
+                        << "\n  refinement multiplier = "
+                        << refinement_multiplier
+                        << "\n  number of pieces = "
+                        << number_of_pieces
+                        << "\n  piece size = "
+                        << Units::convert(
+                            interval_piece_size,
+                            "ns"
+                        )
+                        << " ns";
 
                     for(unsigned int piece_index = 0;
                         piece_index
