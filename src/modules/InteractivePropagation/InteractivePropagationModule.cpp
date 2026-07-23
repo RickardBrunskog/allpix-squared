@@ -4265,8 +4265,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     512U,
                     1024U,
                     2048U,
-                    4096U,
-                    8192U
+                    4096U
                 };
 
             // Construct all refinement levels by subdividing the factor-512
