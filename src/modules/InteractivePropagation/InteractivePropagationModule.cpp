@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
@@ -50,12 +51,28 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     config_.setDefault<unsigned int>("max_charge_groups", 1000);
     config_.setDefault<double>("coulomb_distance_limit", Units::get(200.0,"um"));
     config_.setDefault<double>("coulomb_field_limit", Units::get(4e5,"V/cm")); 
+    // Select whether the Coulomb field limit is applied separately to
+    // every pair contribution or once to the final summed Coulomb vector.
+    config_.setDefault<std::string>(
+        "coulomb_field_limit_mode",
+        "pair"
+    );
     // Diagnostic-only Plummer softening length used during the
     // coupled-RK4 timestep-refinement sweep. A value of zero preserves
     // the existing point-charge/exact-overlap behavior.
     config_.setDefault<double>(
         "coulomb_refinement_softening_length",
         Units::get(0.0, "nm")
+    );
+
+    // Acceptance tolerances for adjacent softened refinement comparisons.
+    config_.setDefault<double>(
+        "coulomb_refinement_charge_weighted_rms_tolerance",
+        Units::get(1.0, "nm")
+    );
+    config_.setDefault<double>(
+        "coulomb_refinement_max_endpoint_tolerance",
+        Units::get(10.0, "nm")
     );
     // Rickard 2026-04-05: Added bool for outputting propagation summary objects
     config_.setDefault<bool>("output_propagation_summary", false);
@@ -141,7 +158,18 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     // Store the coulomb_field_limit_ 
 
     const auto configured_coulomb_field_limit =
-    config_.get<double>("coulomb_field_limit");
+        config_.get<double>(
+            "coulomb_field_limit"
+        );
+
+    if(
+        !std::isfinite(configured_coulomb_field_limit)
+        || configured_coulomb_field_limit < 0.0
+    ) {
+        throw ModuleError(
+            "coulomb_field_limit must be finite and non-negative"
+        );
+    }
 
     coulomb_field_limit_ =
         configured_coulomb_field_limit;
@@ -937,33 +965,104 @@ InteractivePropagationModule::propagate_together(Event* event,
 
     // Temporary runtime diagnostics:
     bool coulomb_debug_first_pair_logged = false;
-    bool coulomb_debug_first_cap_logged = false;
+    bool coulomb_debug_first_pair_cap_logged = false;
+    bool coulomb_debug_first_summed_cap_logged = false;
+
     enum class SourceActivationMode : std::uint8_t {
         DEPOSITION_TIME,
         EXPLICIT_MASK
     };
+
+    enum class CoulombFieldLimitMode : std::uint8_t {
+        PAIR,
+        SUMMED
+    };
+
+    const std::string coulomb_field_limit_mode_name =
+        config_.get<std::string>(
+            "coulomb_field_limit_mode"
+        );
+
+    CoulombFieldLimitMode coulomb_field_limit_mode;
+
+    if(coulomb_field_limit_mode_name == "pair") {
+        coulomb_field_limit_mode =
+            CoulombFieldLimitMode::PAIR;
+
+    } else if(coulomb_field_limit_mode_name == "summed") {
+        coulomb_field_limit_mode =
+            CoulombFieldLimitMode::SUMMED;
+
+    } else {
+        throw ModuleError(
+            "Invalid coulomb_field_limit_mode \""
+            + coulomb_field_limit_mode_name
+            + "\"; allowed values are \"pair\" and \"summed\""
+        );
+    }
+
+    const bool use_pairwise_field_cap =
+        coulomb_field_limit_mode
+            == CoulombFieldLimitMode::PAIR;
+
+    const bool use_summed_field_cap =
+        coulomb_field_limit_mode
+            == CoulombFieldLimitMode::SUMMED;
+
+    LOG(WARNING)
+        << "[COULOMB_FIELD_LIMIT_MODE]"
+        << "\n  mode = "
+        << coulomb_field_limit_mode_name
+        << "\n  limit = "
+        << Units::convert(
+            coulomb_field_limit_,
+            "V/cm"
+        )
+        << " V/cm"
+        << "\n  individual pair fields capped = "
+        << (
+            use_pairwise_field_cap
+                ? "yes"
+                : "no"
+        )
+        << "\n  final summed Coulomb field capped = "
+        << (
+            use_summed_field_cap
+                ? "yes"
+                : "no"
+        );
 
     struct CoulombRefinementStatistics {
         std::uint64_t field_evaluations = 0U;
         std::uint64_t eligible_direct_pairs = 0U;
 
         std::uint64_t overlap_regularizations = 0U;
+        std::uint64_t overlap_pair_fields_above_limit = 0U;
         std::uint64_t capped_overlap_pairs = 0U;
 
         std::uint64_t
             pairs_inside_softening_length = 0U;
 
         std::uint64_t nonoverlap_pairs = 0U;
+        std::uint64_t nonoverlap_pair_fields_above_limit = 0U;
         std::uint64_t capped_nonoverlap_pairs = 0U;
 
-        std::uint64_t summed_fields_above_pair_cap = 0U;
+        std::uint64_t summed_fields_above_limit = 0U;
+        std::uint64_t capped_summed_fields = 0U;
+        std::uint64_t nonfinite_summed_fields = 0U;
 
         double minimum_nonzero_separation =
             std::numeric_limits<double>::infinity();
 
         double maximum_uncapped_overlap_field = 0.0;
         double maximum_uncapped_nonoverlap_field = 0.0;
-        double maximum_summed_field = 0.0;
+
+        // This is measured after any pair-mode caps but before any
+        // summed-mode cap.
+        double maximum_summed_field_before_total_cap = 0.0;
+
+        // This is the field that is actually returned by coulomb_efield.
+        double maximum_returned_summed_field = 0.0;
 
         bool have_first_overlap_pair = false;
 
@@ -1001,6 +1100,30 @@ InteractivePropagationModule::propagate_together(Event* event,
     if(refinement_softening_length < 0.0) {
         throw ModuleError(
             "coulomb_refinement_softening_length "
+            "cannot be negative"
+        );
+    }
+
+    const double refinement_charge_weighted_rms_tolerance =
+    config_.get<double>(
+        "coulomb_refinement_charge_weighted_rms_tolerance"
+    );
+
+    if(refinement_charge_weighted_rms_tolerance < 0.0) {
+        throw ModuleError(
+            "coulomb_refinement_charge_weighted_rms_tolerance "
+            "cannot be negative"
+        );
+    }
+
+    const double refinement_max_endpoint_tolerance =
+        config_.get<double>(
+            "coulomb_refinement_max_endpoint_tolerance"
+        );
+
+    if(refinement_max_endpoint_tolerance < 0.0) {
+        throw ModuleError(
+            "coulomb_refinement_max_endpoint_tolerance "
             "cannot be negative"
         );
     }
@@ -1391,16 +1514,20 @@ InteractivePropagationModule::propagate_together(Event* event,
                             / dist_mag2;
                     }
                     
+                    const bool pair_field_above_limit =
+                        uncapped_interaction_magnitude
+                            > coulomb_field_limit_;
+
+                    const bool pair_cap_applied =
+                        use_pairwise_field_cap
+                        && pair_field_above_limit;
+
                     if(active_refinement_statistics != nullptr) {
 
                         auto& statistics =
                             *active_refinement_statistics;
 
                         statistics.eligible_direct_pairs++;
-
-                        const bool cap_applied =
-                            uncapped_interaction_magnitude
-                            > coulomb_field_limit_;
 
                         if(source_overlaps_target) {
 
@@ -1412,7 +1539,12 @@ InteractivePropagationModule::propagate_together(Event* event,
                                     uncapped_interaction_magnitude
                                 );
 
-                            if(cap_applied) {
+                            if(pair_field_above_limit) {
+                                statistics
+                                    .overlap_pair_fields_above_limit++;
+                            }
+
+                            if(pair_cap_applied) {
                                 statistics.capped_overlap_pairs++;
                             }
 
@@ -1451,17 +1583,21 @@ InteractivePropagationModule::propagate_together(Event* event,
                                     uncapped_interaction_magnitude
                                 );
 
-                            if(cap_applied) {
+                            if(pair_field_above_limit) {
+                                statistics
+                                    .nonoverlap_pair_fields_above_limit++;
+                            }
+
+                            if(pair_cap_applied) {
                                 statistics.capped_nonoverlap_pairs++;
                             }
                         }
                     }
 
                     interaction_magnitude =
-                        std::min(
-                            coulomb_field_limit_,
-                            uncapped_interaction_magnitude
-                        );
+                        pair_cap_applied
+                            ? coulomb_field_limit_
+                            : uncapped_interaction_magnitude;
 
                     if(
                         record_diagnostics
@@ -1533,12 +1669,19 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 "V/cm"
                             )
                             << " V/cm"
-                            << "\n  cap applied = "
+                            << "\n  field-limit mode = "
+                            << coulomb_field_limit_mode_name
+                            << "\n  pair field above limit = "
                             << (
-                                uncapped_interaction_magnitude
-                                    > coulomb_field_limit_
-                                ? "YES"
-                                : "NO"
+                                pair_field_above_limit
+                                    ? "YES"
+                                    : "NO"
+                            )
+                            << "\n  pair cap applied = "
+                            << (
+                                pair_cap_applied
+                                    ? "YES"
+                                    : "NO"
                             );
 
                         coulomb_debug_first_pair_logged = true;
@@ -1546,12 +1689,11 @@ InteractivePropagationModule::propagate_together(Event* event,
 
                     if(
                         record_diagnostics
-                        && !coulomb_debug_first_cap_logged
-                        && uncapped_interaction_magnitude
-                        > coulomb_field_limit_
+                        && !coulomb_debug_first_pair_cap_logged
+                        && pair_cap_applied
                     ) {
                         LOG(WARNING)
-                            << "[COULOMB_DEBUG_CAP]"
+                            << "[COULOMB_DEBUG_PAIR_CAP]"
                             << "\n  call number = "
                             << coulomb_debug_call_count
                             << "\n  source group index = "
@@ -1584,9 +1726,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 interaction_magnitude,
                                 "V/cm"
                             )
-                            << " V/cm";
+                            << " V/cm"
+                            << "\n  field-limit mode = "
+                            << coulomb_field_limit_mode_name;
 
-                        coulomb_debug_first_cap_logged = true;
+                        coulomb_debug_first_pair_cap_logged = true;
                     }
 
                     if(
@@ -1634,56 +1778,255 @@ InteractivePropagationModule::propagate_together(Event* event,
             dist_vector = point - mirror_position_neg;
             dist_mag2 = dist_vector.Mag2();
 
-            if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
-                dist_mag = ROOT::Math::sqrt(dist_mag2);
-                field = field - dist_vector / dist_mag * sign *
-                        std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
+            if(
+                dist_mag2 > 0.0
+                && dist_mag2 < coulomb_distance_limit_squared_
+            ) {
+                dist_mag =
+                    ROOT::Math::sqrt(dist_mag2);
+
+                const double uncapped_mirror_magnitude =
+                    coulomb_K_
+                    / relative_permittivity_
+                    * static_cast<double>(q)
+                    / dist_mag2;
+
+                const double mirror_magnitude =
+                    use_pairwise_field_cap
+                        ? std::min(
+                            coulomb_field_limit_,
+                            uncapped_mirror_magnitude
+                        )
+                        : uncapped_mirror_magnitude;
+
+                field =
+                    field
+                    - dist_vector
+                        / dist_mag
+                        * sign
+                        * mirror_magnitude;
             }
 
             // Apply field for positive-side mirror charge
             dist_vector = point - mirror_position_pos;
             dist_mag2 = dist_vector.Mag2();
 
-            if(dist_mag2 > 0.0 && dist_mag2 < coulomb_distance_limit_squared_) {
-                dist_mag = ROOT::Math::sqrt(dist_mag2);
-                field = field - dist_vector / dist_mag * sign * std::min(coulomb_field_limit_, coulomb_K_ / relative_permittivity_ * q / dist_mag2);
+            if(
+                dist_mag2 > 0.0
+                && dist_mag2 < coulomb_distance_limit_squared_
+            ) {
+                dist_mag =
+                    ROOT::Math::sqrt(dist_mag2);
+
+                const double uncapped_mirror_magnitude =
+                    coulomb_K_
+                    / relative_permittivity_
+                    * static_cast<double>(q)
+                    / dist_mag2;
+
+                const double mirror_magnitude =
+                    use_pairwise_field_cap
+                        ? std::min(
+                            coulomb_field_limit_,
+                            uncapped_mirror_magnitude
+                        )
+                        : uncapped_mirror_magnitude;
+
+                field =
+                    field
+                    - dist_vector
+                        / dist_mag
+                        * sign
+                        * mirror_magnitude;
             }
         }
+
+        // The pair loop has now completed. In summed mode, preserve the
+        // direction of the complete Coulomb vector and limit only its magnitude.
+        // This includes both direct and mirror-charge contributions.
+        const ROOT::Math::XYZVector
+            field_before_total_cap =
+                field;
+
+        const double summed_field_before_total_cap =
+            std::hypot(
+                field_before_total_cap.x(),
+                field_before_total_cap.y(),
+                field_before_total_cap.z()
+            );
+
+        const bool summed_field_is_finite =
+            std::isfinite(
+                summed_field_before_total_cap
+            );
+
+        const bool summed_field_above_limit =
+            summed_field_is_finite
+            && summed_field_before_total_cap
+                > coulomb_field_limit_;
+
+        const bool summed_cap_applied =
+            use_summed_field_cap
+            && summed_field_above_limit;
+
+        double summed_field_scale = 1.0;
 
         if(active_refinement_statistics != nullptr) {
 
             auto& statistics =
                 *active_refinement_statistics;
 
-            const double summed_field_magnitude =
-                std::sqrt(
-                    field.Mag2()
-                );
-
-            statistics.maximum_summed_field =
-                std::max(
-                    statistics.maximum_summed_field,
-                    summed_field_magnitude
-                );
-
-            if(
-                summed_field_magnitude
-                > coulomb_field_limit_
-            ) {
+            if(summed_field_is_finite) {
                 statistics
-                    .summed_fields_above_pair_cap++;
+                    .maximum_summed_field_before_total_cap =
+                        std::max(
+                            statistics
+                                .maximum_summed_field_before_total_cap,
+                            summed_field_before_total_cap
+                        );
+
+                if(summed_field_above_limit) {
+                    statistics.summed_fields_above_limit++;
+                }
+
+            } else {
+                statistics.nonfinite_summed_fields++;
             }
         }
 
-        // TODO: Rather than using coulomb_field_limit for each interaction, we could use it on the final value. 
-            // (commented out for now since determining a good value is tricky)
-            // if (field.mag2() > coulomb_field_limit_squared_){
-            //     double field_mag = ROOT::Math::sqrt(field.mag2());
-            //     // LOG(INFO) << "Skipping field with magnitude " << field_mag << " > "<<coulomb_field_limit_;
-            //     field = Eigen::Vector3d(field.x() / field_mag * coulomb_field_limit_, field.y() / field_mag * coulomb_field_limit_, field.z() / field_mag * coulomb_field_limit_);
-            //     // LOG(INFO) << "   now " << field.mag2();
-            //     numSamePos+=1;
-            // }
+        if(summed_cap_applied) {
+
+            summed_field_scale =
+                coulomb_field_limit_
+                / summed_field_before_total_cap;
+
+            field =
+                ROOT::Math::XYZVector(
+                    field_before_total_cap.x()
+                        * summed_field_scale,
+                    field_before_total_cap.y()
+                        * summed_field_scale,
+                    field_before_total_cap.z()
+                        * summed_field_scale
+                );
+        }
+
+        const double returned_summed_field_magnitude =
+            std::hypot(
+                field.x(),
+                field.y(),
+                field.z()
+            );
+
+        if(active_refinement_statistics != nullptr) {
+
+            auto& statistics =
+                *active_refinement_statistics;
+
+            if(summed_cap_applied) {
+                statistics.capped_summed_fields++;
+            }
+
+            if(std::isfinite(returned_summed_field_magnitude)) {
+                statistics.maximum_returned_summed_field =
+                    std::max(
+                        statistics.maximum_returned_summed_field,
+                        returned_summed_field_magnitude
+                    );
+            }
+        }
+
+        // Verify that a finite summed cap did not return a magnitude above
+        // the configured limit except for insignificant rounding error.
+        const double summed_cap_validation_tolerance =
+            64.0
+            * std::numeric_limits<double>::epsilon()
+            * std::max(
+                1.0,
+                std::abs(coulomb_field_limit_)
+            );
+
+        if(
+            summed_cap_applied
+            && (
+                !std::isfinite(returned_summed_field_magnitude)
+                || returned_summed_field_magnitude
+                    > coulomb_field_limit_
+                        + summed_cap_validation_tolerance
+            )
+        ) {
+            throw ModuleError(
+                "Direction-preserving summed Coulomb field cap failed"
+            );
+        }
+
+        if(
+            record_diagnostics
+            && summed_cap_applied
+            && !coulomb_debug_first_summed_cap_logged
+        ) {
+            LOG(WARNING)
+                << "[COULOMB_DEBUG_SUMMED_CAP]"
+                << "\n  call number = "
+                << coulomb_debug_call_count
+                << "\n  target group index = "
+                << target_index
+                << "\n  field before cap = ("
+                << Units::convert(
+                    field_before_total_cap.x(),
+                    "V/cm"
+                )
+                << ", "
+                << Units::convert(
+                    field_before_total_cap.y(),
+                    "V/cm"
+                )
+                << ", "
+                << Units::convert(
+                    field_before_total_cap.z(),
+                    "V/cm"
+                )
+                << ") V/cm"
+                << "\n  magnitude before cap = "
+                << Units::convert(
+                    summed_field_before_total_cap,
+                    "V/cm"
+                )
+                << " V/cm"
+                << "\n  configured limit = "
+                << Units::convert(
+                    coulomb_field_limit_,
+                    "V/cm"
+                )
+                << " V/cm"
+                << "\n  direction-preserving scale factor = "
+                << summed_field_scale
+                << "\n  field after cap = ("
+                << Units::convert(
+                    field.x(),
+                    "V/cm"
+                )
+                << ", "
+                << Units::convert(
+                    field.y(),
+                    "V/cm"
+                )
+                << ", "
+                << Units::convert(
+                    field.z(),
+                    "V/cm"
+                )
+                << ") V/cm"
+                << "\n  returned magnitude = "
+                << Units::convert(
+                    returned_summed_field_magnitude,
+                    "V/cm"
+                )
+                << " V/cm";
+
+            coulomb_debug_first_summed_cap_logged =
+                true;
+        }
 
         if(debug_this_call) {
             LOG(WARNING)
@@ -1747,6 +2090,22 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << debug_sources_outside_cutoff
                 << "\n  eligible direct interactions = "
                 << debug_sources_eligible
+                << "\n  field-limit mode = "
+                << coulomb_field_limit_mode_name
+                << "\n  summed field before total cap = "
+                << Units::convert(
+                    summed_field_before_total_cap,
+                    "V/cm"
+                )
+                << " V/cm"
+                << "\n  summed cap applied = "
+                << (
+                    summed_cap_applied
+                        ? "YES"
+                        : "NO"
+                )
+                << "\n  summed-field scale factor = "
+                << summed_field_scale
                 << "\n  resulting field vector, internal = ("
                 << field.x()
                 << ", "
@@ -4268,9 +4627,9 @@ InteractivePropagationModule::propagate_together(Event* event,
             
 
             // The previous endpoint initially contains the unsoftened
-            // sequential shadow. The factor-512 result is therefore NOT an
-            // adjacent softened convergence comparison. All later entries
-            // compare adjacent softened calculations on nested grids.
+            // sequential shadow. The first refinement result is therefore
+            // NOT an adjacent softened convergence comparison. All later
+            // entries compare adjacent softened calculations on nested grids.
             auto previous_refinement_positions =
                 sequential_shadow_positions;
 
@@ -4378,6 +4737,14 @@ InteractivePropagationModule::propagate_together(Event* event,
                         )
                         << "\n  refinement factor = "
                         << refinement_factor
+                        << "\n  field-limit mode = "
+                        << coulomb_field_limit_mode_name
+                        << "\n  field limit = "
+                        << Units::convert(
+                            coulomb_field_limit_,
+                            "V/cm"
+                        )
+                        << " V/cm"
                         << "\n  interval index = "
                         << interval_index
                         << "\n  interval start = "
@@ -4807,6 +5174,48 @@ InteractivePropagationModule::propagate_together(Event* event,
                                     refinement_factor / 2U
                                 );
 
+                // A convergence decision is valid only when comparing two
+                // adjacent softened calculations. The first factor instead
+                // compares against the unsoftened sequential shadow.
+                const bool is_adjacent_softened_comparison =
+                    refinement_factor
+                        != refinement_factors.front();
+
+                const bool has_comparison_data =
+                    refinement_groups_compared > 0U
+                    && total_charge_compared > 0.0;
+
+                const bool finite_positions_pass =
+                    refinement_nonfinite_groups == 0U;
+
+                const bool charge_weighted_rms_pass =
+                    std::isfinite(
+                        charge_weighted_endpoint_rms
+                    )
+                    && charge_weighted_endpoint_rms
+                        <= refinement_charge_weighted_rms_tolerance;
+
+                const bool maximum_endpoint_pass =
+                    std::isfinite(
+                        previous_endpoint_max_difference
+                    )
+                    && previous_endpoint_max_difference
+                        <= refinement_max_endpoint_tolerance;
+
+                const bool convergence_accepted =
+                    is_adjacent_softened_comparison
+                    && has_comparison_data
+                    && finite_positions_pass
+                    && charge_weighted_rms_pass
+                    && maximum_endpoint_pass;
+
+                const std::string acceptance_result =
+                    !is_adjacent_softened_comparison
+                        ? "NOT_EVALUATED"
+                        : convergence_accepted
+                            ? "PASS"
+                            : "FAIL";
+
                 LOG(WARNING)
                     << "[COUPLED_RK4_TIMESTEP_REFINEMENT]"
                     << "\n  refinement factor = "
@@ -4962,6 +5371,73 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "\n  errors above 500 nm = "
                     << endpoint_errors_above_500_nm;
 
+                LOG(WARNING)
+                    << "[COUPLED_RK4_CONVERGENCE_ACCEPTANCE]"
+                    << "\n  refinement factor = "
+                    << refinement_factor
+                    << "\n  comparison reference = "
+                    << comparison_reference
+                    << "\n  adjacent softened comparison = "
+                    << (
+                        is_adjacent_softened_comparison
+                            ? "yes"
+                            : "no"
+                    )
+                    << "\n  groups compared = "
+                    << refinement_groups_compared
+                    << "\n  comparison data present = "
+                    << (
+                        has_comparison_data
+                            ? "PASS"
+                            : "FAIL"
+                    )
+                    << "\n  non-finite groups = "
+                    << refinement_nonfinite_groups
+                    << "\n  zero non-finite groups = "
+                    << (
+                        finite_positions_pass
+                            ? "PASS"
+                            : "FAIL"
+                    )
+                    << "\n  charge-weighted RMS endpoint error = "
+                    << Units::convert(
+                        charge_weighted_endpoint_rms,
+                        "nm"
+                    )
+                    << " nm"
+                    << "\n  charge-weighted RMS tolerance = "
+                    << Units::convert(
+                        refinement_charge_weighted_rms_tolerance,
+                        "nm"
+                    )
+                    << " nm"
+                    << "\n  charge-weighted RMS criterion = "
+                    << (
+                        charge_weighted_rms_pass
+                            ? "PASS"
+                            : "FAIL"
+                    )
+                    << "\n  maximum endpoint error = "
+                    << Units::convert(
+                        previous_endpoint_max_difference,
+                        "nm"
+                    )
+                    << " nm"
+                    << "\n  maximum endpoint tolerance = "
+                    << Units::convert(
+                        refinement_max_endpoint_tolerance,
+                        "nm"
+                    )
+                    << " nm"
+                    << "\n  maximum endpoint criterion = "
+                    << (
+                        maximum_endpoint_pass
+                            ? "PASS"
+                            : "FAIL"
+                    )
+                    << "\n  acceptance result = "
+                    << acceptance_result;
+
                 const std::size_t number_of_top_errors =
                     std::min<std::size_t>(
                         10U,
@@ -5068,18 +5544,39 @@ InteractivePropagationModule::propagate_together(Event* event,
                         << " um";
                 }
                 
+                const std::uint64_t
+                    direct_pair_fields_above_limit =
+                        refinement_statistics
+                            .overlap_pair_fields_above_limit
+                        + refinement_statistics
+                            .nonoverlap_pair_fields_above_limit;
+
                 const std::uint64_t capped_direct_pairs =
                     refinement_statistics.capped_overlap_pairs
                     + refinement_statistics.capped_nonoverlap_pairs;
+
+                const double
+                    direct_pair_fields_above_limit_fraction =
+                        refinement_statistics
+                                .eligible_direct_pairs > 0U
+                            ? static_cast<double>(
+                                direct_pair_fields_above_limit
+                            )
+                                / static_cast<double>(
+                                    refinement_statistics
+                                        .eligible_direct_pairs
+                                )
+                            : 0.0;
 
                 const double capped_direct_fraction =
                     refinement_statistics.eligible_direct_pairs > 0U
                         ? static_cast<double>(
                             capped_direct_pairs
                         )
-                        / static_cast<double>(
-                            refinement_statistics.eligible_direct_pairs
-                        )
+                            / static_cast<double>(
+                                refinement_statistics
+                                    .eligible_direct_pairs
+                            )
                         : 0.0;
 
                 const double capped_overlap_fraction =
@@ -5087,19 +5584,21 @@ InteractivePropagationModule::propagate_together(Event* event,
                         ? static_cast<double>(
                             refinement_statistics.capped_overlap_pairs
                         )
-                        / static_cast<double>(
-                            refinement_statistics.overlap_regularizations
-                        )
+                            / static_cast<double>(
+                                refinement_statistics
+                                    .overlap_regularizations
+                            )
                         : 0.0;
 
                 const double capped_nonoverlap_fraction =
                     refinement_statistics.nonoverlap_pairs > 0U
                         ? static_cast<double>(
-                            refinement_statistics.capped_nonoverlap_pairs
+                            refinement_statistics
+                                .capped_nonoverlap_pairs
                         )
-                        / static_cast<double>(
-                            refinement_statistics.nonoverlap_pairs
-                        )
+                            / static_cast<double>(
+                                refinement_statistics.nonoverlap_pairs
+                            )
                         : 0.0;
 
                 const double eligible_pairs_per_field_evaluation =
@@ -5107,20 +5606,30 @@ InteractivePropagationModule::propagate_together(Event* event,
                         ? static_cast<double>(
                             refinement_statistics.eligible_direct_pairs
                         )
-                        / static_cast<double>(
-                            refinement_statistics.field_evaluations
-                        )
+                            / static_cast<double>(
+                                refinement_statistics.field_evaluations
+                            )
                         : 0.0;
 
-                const double summed_above_cap_fraction =
+                const double summed_above_limit_fraction =
                     refinement_statistics.field_evaluations > 0U
                         ? static_cast<double>(
                             refinement_statistics
-                                .summed_fields_above_pair_cap
+                                .summed_fields_above_limit
                         )
-                        / static_cast<double>(
-                            refinement_statistics.field_evaluations
+                            / static_cast<double>(
+                                refinement_statistics.field_evaluations
+                            )
+                        : 0.0;
+
+                const double summed_cap_fraction =
+                    refinement_statistics.field_evaluations > 0U
+                        ? static_cast<double>(
+                            refinement_statistics.capped_summed_fields
                         )
+                            / static_cast<double>(
+                                refinement_statistics.field_evaluations
+                            )
                         : 0.0;
 
                 const bool have_nonoverlap_separation =
@@ -5147,22 +5656,32 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "\n  eligible direct pair evaluations = "
                     << refinement_statistics.eligible_direct_pairs
                     << "\n  eligible pairs per field evaluation = "
-                    << eligible_pairs_per_field_evaluation
                     << "\n  exact-overlap regularizations = "
                     << refinement_statistics.overlap_regularizations
-                    << "\n  capped exact-overlap pairs = "
+                    << "\n  overlap pair fields above limit = "
+                    << refinement_statistics
+                        .overlap_pair_fields_above_limit
+                    << "\n  actually capped overlap pairs = "
                     << refinement_statistics.capped_overlap_pairs
-                    << "\n  capped overlap fraction = "
+                    << "\n  actual overlap-cap fraction = "
                     << capped_overlap_fraction
                     << "\n  non-overlap pair evaluations = "
                     << refinement_statistics.nonoverlap_pairs
-                    << "\n  capped non-overlap pairs = "
-                    << refinement_statistics.capped_nonoverlap_pairs
-                    << "\n  capped non-overlap fraction = "
+                    << "\n  non-overlap pair fields above limit = "
+                    << refinement_statistics
+                        .nonoverlap_pair_fields_above_limit
+                    << "\n  actually capped non-overlap pairs = "
+                    << refinement_statistics
+                        .capped_nonoverlap_pairs
+                    << "\n  actual non-overlap-cap fraction = "
                     << capped_nonoverlap_fraction
-                    << "\n  all capped direct pairs = "
+                    << "\n  all direct pair fields above limit = "
+                    << direct_pair_fields_above_limit
+                    << "\n  direct-pair-above-limit fraction = "
+                    << direct_pair_fields_above_limit_fraction
+                    << "\n  all actually capped direct pairs = "
                     << capped_direct_pairs
-                    << "\n  all capped direct-pair fraction = "
+                    << "\n  actual direct-pair-cap fraction = "
                     << capped_direct_fraction
                     << "\n  have non-overlap separation = "
                     << have_nonoverlap_separation
