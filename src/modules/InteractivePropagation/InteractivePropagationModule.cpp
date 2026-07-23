@@ -561,13 +561,15 @@ void InteractivePropagationModule::initialize() {
 
         coulomb_mag_histo_ =
             CreateHistogram<TH1D>("coulomb_mag_histo",
-                      "Direct Coulomb Field Interaction Magnitude;Interaction Field Magnitude [V/cm];Count",
-                      200, // Number of bins for the field magnitude
-                      0,   // Minimum field magnitude
-                      Units::convert(
-                        coulomb_field_limit_,
-                        "V/cm"
-                    )
+                        "Direct Coulomb Field Interaction Magnitude;Interaction Field Magnitude [V/cm];Count",
+                        200,
+                        0.0,
+                        static_cast<double>(
+                            Units::convert(
+                                coulomb_field_limit_,
+                                "V/cm"
+                            )
+                        )
             );
     }
 }
@@ -1742,9 +1744,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                         && interaction_magnitude >= 0.0
                     ) {
                         coulomb_mag_histo_->Fill(
-                            Units::convert(
-                                interaction_magnitude,
-                                "V/cm"
+                            static_cast<double>(
+                                Units::convert(
+                                    interaction_magnitude,
+                                    "V/cm"
+                                )
                             )
                         );
                     }
@@ -5666,6 +5670,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << "\n  eligible direct pair evaluations = "
                     << refinement_statistics.eligible_direct_pairs
                     << "\n  eligible pairs per field evaluation = "
+                    << eligible_pairs_per_field_evaluation
                     << "\n  exact-overlap regularizations = "
                     << refinement_statistics.overlap_regularizations
                     << "\n  overlap pair fields above limit = "
@@ -5718,18 +5723,6 @@ InteractivePropagationModule::propagate_together(Event* event,
                         "V/cm"
                     )
                     << " V/cm"
-                    << "\n  maximum summed Coulomb field = "
-                    << Units::convert(
-                        refinement_statistics
-                            .maximum_summed_field,
-                        "V/cm"
-                    )
-                    << " V/cm"
-                    << "\n  summed fields above pair cap = "
-                    << refinement_statistics
-                        .summed_fields_above_pair_cap
-                    << "\n  summed-field-above-cap fraction = "
-                    << summed_above_cap_fraction
                     << "\n  first overlap pair found = "
                     << refinement_statistics
                         .have_first_overlap_pair
