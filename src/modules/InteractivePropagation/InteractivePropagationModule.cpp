@@ -4260,51 +4260,21 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Test convergence of the coupled deterministic endpoint while
             // retaining every merged charge-activation boundary.
-            const std::vector<unsigned int>
-                refinement_factors = {
-                    2U,
-                    4U,
-                    8U,
-                    16U,
-                    32U,
-                    64U,
-                    128U,
-                    256U,
-                    512U,
-                    1024U,
-                    2048U,
-                    4096U
-                };
+            const std::vector<unsigned int> refinement_factors = {
+                2U,
+                4U,
+                8U,
+                16U,
+                32U,
+                64U,
+                128U,
+                256U,
+                512U,
+                1024U,
+                2048U
+            };
 
-            // Construct all refinement levels by subdividing the factor-512
-            // interval grid. This ensures that even very short activation
-            // intervals are refined at every subsequent level.
-            const unsigned int base_refinement_factor =
-                refinement_factors.front();
-
-            const double base_max_shadow_substep =
-                timestep_
-                / static_cast<double>(
-                    base_refinement_factor
-                );
-
-            // Every refinement factor must be an integer multiple of the
-            // base factor so that the interval grids remain nested.
-            for(const auto refinement_factor :
-                refinement_factors) {
-
-                if(
-                    refinement_factor < base_refinement_factor
-                    || refinement_factor
-                        % base_refinement_factor
-                        != 0U
-                ) {
-                    throw ModuleError(
-                        "RK4 refinement factor is not an integer "
-                        "multiple of the base refinement factor"
-                    );
-                }
-            }
+            
 
             // The previous endpoint initially contains the unsoftened
             // sequential shadow. The factor-512 result is therefore NOT an
@@ -4315,10 +4285,6 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             for(const auto refinement_factor :
                 refinement_factors) {
-
-                const unsigned int refinement_multiplier =
-                    refinement_factor
-                    / base_refinement_factor;
 
                 const double max_shadow_substep =
                     timestep_
@@ -4389,26 +4355,25 @@ InteractivePropagationModule::propagate_together(Event* event,
                         }
                     }
 
-                    // First determine the factor-512 subdivision of this
-                    // activation interval.
-                    const unsigned int base_number_of_pieces =
+                    // Determine how many pieces are required to respect the requested
+                    // maximum substep. Round upward to a power of two so consecutive
+                    // refinement grids remain nested.
+                    const unsigned int required_number_of_pieces =
                         std::max(
                             1U,
                             static_cast<unsigned int>(
                                 std::ceil(
                                     interval_size
-                                    / base_max_shadow_substep
+                                    / max_shadow_substep
                                 )
                             )
                         );
 
-                    // Every finer level subdivides each base-grid piece by an
-                    // integer multiplier. This makes all refinement grids nested,
-                    // including intervals shorter than the nominal timestep.
-                    const unsigned int number_of_pieces =
-                        base_number_of_pieces
-                        * refinement_multiplier;
+                    unsigned int number_of_pieces = 1U;
 
+                    while(number_of_pieces < required_number_of_pieces) {
+                        number_of_pieces *= 2U;
+                    }
                     const double interval_piece_size =
                         interval_size
                         / static_cast<double>(
@@ -4444,11 +4409,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                         << " ns"
                         << "\n  active groups = "
                         << interval_active_groups
-                        << "\n  base number of pieces = "
-                        << base_number_of_pieces
-                        << "\n  refinement multiplier = "
-                        << refinement_multiplier
-                        << "\n  number of pieces = "
+                        << "\n  required number of pieces = "
+                        << required_number_of_pieces
+                        << "\n  power-of-two number of pieces = "
                         << number_of_pieces
                         << "\n  piece size = "
                         << Units::convert(
