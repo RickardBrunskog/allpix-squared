@@ -4264,7 +4264,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                 refinement_factors = {
                     512U, 
                     1024U, 
-                    2048U
+                    2048U,
+                    4096U,
+                    8192U
                 };
 
             // The previous endpoint initially contains the unsoftened
