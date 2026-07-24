@@ -3154,11 +3154,14 @@ InteractivePropagationModule::propagate_together(Event* event,
                 continue;
             }
 
-            const auto diffused_position =
+            const Eigen::Vector3d drift_position =
                 convertPointToVector(
                     post_drift_positions[i]
-                )
-                + diffusion_increments[i];
+                );
+
+            const Eigen::Vector3d post_diffusion_position =
+                drift_position
+                + diffusion_displacement;
 
             if(!diffused_position.allFinite()) {
                 throw ModuleError(
@@ -7398,7 +7401,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                         : "no"
                 );
         }
-        
+
         active_refinement_statistics = nullptr;
 
     }
