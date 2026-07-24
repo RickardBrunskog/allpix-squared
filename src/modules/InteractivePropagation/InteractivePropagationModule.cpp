@@ -2999,6 +2999,136 @@ InteractivePropagationModule::propagate_together(Event* event,
         return final_positions;
     };
 
+    // Apply one operator-split diffusion kick after a refined coupled-RK4
+    // drift substep. To preserve the convention used by the existing outer
+    // propagation loop, the mobility and diffusion coefficient are evaluated
+    // from the common pre-drift state at the beginning of the substep.
+    //
+    // The input position vectors remain immutable while every active carrier's
+    // kick is calculated. This prevents the result from depending on carrier
+    // iteration order through partially updated Coulomb source positions.
+    const auto apply_refined_substep_diffusion =
+        [&](const std::vector<ROOT::Math::XYZPoint>&
+                pre_drift_positions,
+            const std::vector<ROOT::Math::XYZPoint>&
+                post_drift_positions,
+            const std::vector<std::uint8_t>&
+                active_mask,
+            double softening_length,
+            double substep_start,
+            double substep_size)
+            -> std::vector<ROOT::Math::XYZPoint> {
+
+        if(
+            pre_drift_positions.size()
+                != propagating_charges.size()
+            || post_drift_positions.size()
+                != propagating_charges.size()
+            || active_mask.size()
+                != propagating_charges.size()
+        ) {
+            throw ModuleError(
+                "Invalid vector size in refined diffusion substep"
+            );
+        }
+
+        if(
+            !std::isfinite(substep_size)
+            || substep_size <= 0.0
+        ) {
+            throw ModuleError(
+                "Invalid duration in refined diffusion substep"
+            );
+        }
+
+        auto diffused_positions =
+            post_drift_positions;
+
+        if(!enable_diffusion_) {
+            return diffused_positions;
+        }
+
+        for(
+            unsigned int i = 0U;
+            i < propagating_charges.size();
+            i++
+        ) {
+            if(
+                active_mask[i] == 0U
+                || previous_charge_states[i]
+                    != CarrierState::MOTION
+            ) {
+                continue;
+            }
+
+            const ROOT::Math::XYZPoint&
+                pre_drift_position =
+                    pre_drift_positions[i];
+
+            const auto raw_field =
+                detector_->getElectricField(
+                    pre_drift_position
+                );
+
+            Eigen::Vector3d substep_efield(
+                raw_field.x(),
+                raw_field.y(),
+                raw_field.z()
+            );
+
+            substep_efield += coulomb_efield(
+                substep_start,
+                pre_drift_position,
+                i,
+                pre_drift_positions,
+                previous_charge_states,
+                active_mask,
+                SourceActivationMode::EXPLICIT_MASK,
+                softening_length,
+                false
+            );
+
+            const auto substep_doping =
+                detector_->getDopingConcentration(
+                    pre_drift_position
+                );
+
+            const Eigen::Vector3d
+                diffusion_displacement =
+                    carrier_diffusion(
+                        substep_efield.norm(),
+                        substep_doping,
+                        substep_size,
+                        propagating_charges[i].getType()
+                    );
+
+            const Eigen::Vector3d
+                post_drift_position =
+                    convertPointToVector(
+                        post_drift_positions[i]
+                    );
+
+            const Eigen::Vector3d
+                diffused_position =
+                    post_drift_position
+                    + diffusion_displacement;
+
+            if(!diffused_position.allFinite()) {
+                throw ModuleError(
+                    "Refined diffusion produced a non-finite "
+                    "carrier position"
+                );
+            }
+
+            diffused_positions[i] =
+                convertVectorToPoint(
+                    diffused_position
+                );
+        }
+
+        return diffused_positions;
+    };
+
     // Set up variables that are changed each loop
     Eigen::Vector3d efield{};
     allpix::PropagatedCharge charge = propagating_charges[0];
@@ -6074,6 +6204,12 @@ InteractivePropagationModule::propagate_together(Event* event,
         std::vector<ROOT::Math::XYZPoint>
             initial_step_refined_positions;
 
+        std::vector<Eigen::Vector3d>
+            initial_step_refined_drift_displacements;
+
+        std::uint64_t
+            initial_step_refined_diffusion_kicks = 0U;
+
         if(
             enable_coulomb_initial_step_refinement
             && time == 0.0
@@ -6193,6 +6329,11 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             initial_step_refined_positions =
                 previous_charge_locations;
+
+            initial_step_refined_drift_displacements.assign(
+                propagating_charges.size(),
+                Eigen::Vector3d::Zero()
+            );
 
             std::uint64_t refined_substeps_advanced =
                 0U;
@@ -6320,13 +6461,61 @@ InteractivePropagationModule::propagate_together(Event* event,
                     const double actual_substep =
                         piece_end - piece_start;
 
-                    initial_step_refined_positions =
+                    const auto post_drift_positions =
                         advance_coupled_substep(
                             initial_step_refined_positions,
                             interval_active_mask,
                             production_softening_length,
                             piece_start,
                             piece_end
+                        );
+
+                    for(
+                        unsigned int i = 0U;
+                        i < propagating_charges.size();
+                        i++
+                    ) {
+                        if(
+                            interval_active_mask[i] == 0U
+                            || previous_charge_states[i]
+                                != CarrierState::MOTION
+                        ) {
+                            continue;
+                        }
+
+                        const Eigen::Vector3d
+                            pre_drift_position =
+                                convertPointToVector(
+                                    initial_step_refined_positions[
+                                        i
+                                    ]
+                                );
+
+                        const Eigen::Vector3d
+                            post_drift_position =
+                                convertPointToVector(
+                                    post_drift_positions[i]
+                                );
+
+                        initial_step_refined_drift_displacements[
+                            i
+                        ] +=
+                            post_drift_position
+                            - pre_drift_position;
+
+                        if(enable_diffusion_) {
+                            initial_step_refined_diffusion_kicks++;
+                        }
+                    }
+
+                    initial_step_refined_positions =
+                        apply_refined_substep_diffusion(
+                            initial_step_refined_positions,
+                            post_drift_positions,
+                            interval_active_mask,
+                            production_softening_length,
+                            piece_start,
+                            actual_substep
                         );
 
                     largest_actual_substep =
@@ -6398,7 +6587,16 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << "\n  retained activation boundaries = "
                 << merged_boundaries.size()
                 << "\n  coupled substeps advanced = "
-                << refined_substeps_advanced;
+                << refined_substeps_advanced
+                << "\n  diffusion integrated after each "
+                   "refined drift substep = "
+                << (
+                    enable_diffusion_
+                        ? "yes"
+                        : "no"
+                )
+                << "\n  refined diffusion kicks = "
+                << initial_step_refined_diffusion_kicks;
         }
 
         // Move all charges by a single outer timestep. During the first
@@ -6502,8 +6700,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                         );
 
                 deterministic_step_value =
-                    refined_endpoint
-                    - runge_kutta.getValue();
+                    initial_step_refined_drift_displacements[
+                        i
+                    ];
 
                 runge_kutta.setValue(
                     refined_endpoint
@@ -6738,9 +6937,13 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Get the new position due to the electric field
             position = convertVectorToPoint(runge_kutta.getValue());
 
-            // Apply one operator-split diffusion displacement over the actual
-            // duration for which this carrier was active in the outer step.
-            if(enable_diffusion_) {
+            // The refined first interval already received one correctly scaled
+            // diffusion kick after every coupled drift substep. Apply the
+            // original one-kick outer-step treatment only on unrefined steps.
+            if(
+                enable_diffusion_
+                && !initial_step_refinement_performed
+            ) {
                 const auto diffusion =
                     carrier_diffusion(
                         efield.norm(),
@@ -7000,7 +7203,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                     "ns"
                 )
                 << " ns"
-                << "\n  diffusion applied after coupled drift = "
+                << "\n  diffusion integrated inside refined "
+                   "substeps = "
                 << (
                     enable_diffusion_
                         ? "yes"
