@@ -6008,7 +6008,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         active_refinement_statistics =
             production_coulomb_statistics_pointer;
         
-            // Move all charges by a single timestep
+        // Move all charges by a single timestep
         for (unsigned int i = 0; i < propagating_charges.size(); i++){
             
             // Update local variables for convenient access and reduced array calling
@@ -6614,7 +6614,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             group_size_histo_->Fill(charge.getCharge());
         }
     }
-    
+
     if(enable_coulomb_production_statistics) {
 
         const auto fraction =
@@ -6740,6 +6740,65 @@ InteractivePropagationModule::propagate_together(Event* event,
             << "\n  non-finite summed fields = "
             << production_coulomb_statistics
                 .nonfinite_summed_fields;
+
+        const auto log_final_states =
+            [](const char* carrier_name,
+               const FinalCarrierStateStatistics& statistics) {
+
+                const std::uint64_t total_groups =
+                    statistics.motion.groups
+                    + statistics.halted.groups
+                    + statistics.recombined.groups
+                    + statistics.trapped.groups
+                    + statistics.unknown.groups;
+
+                const std::uint64_t total_charge =
+                    statistics.motion.charge
+                    + statistics.halted.charge
+                    + statistics.recombined.charge
+                    + statistics.trapped.charge
+                    + statistics.unknown.charge;
+
+                LOG(WARNING)
+                    << "[PROPAGATION_FINAL_STATE_STATISTICS]"
+                    << "\n  carrier type = "
+                    << carrier_name
+                    << "\n  total groups = "
+                    << total_groups
+                    << "\n  total charge = "
+                    << total_charge
+                    << "\n  MOTION groups/charge = "
+                    << statistics.motion.groups
+                    << " / "
+                    << statistics.motion.charge
+                    << "\n  HALTED groups/charge = "
+                    << statistics.halted.groups
+                    << " / "
+                    << statistics.halted.charge
+                    << "\n  RECOMBINED groups/charge = "
+                    << statistics.recombined.groups
+                    << " / "
+                    << statistics.recombined.charge
+                    << "\n  TRAPPED groups/charge = "
+                    << statistics.trapped.groups
+                    << " / "
+                    << statistics.trapped.charge
+                    << "\n  UNKNOWN groups/charge = "
+                    << statistics.unknown.groups
+                    << " / "
+                    << statistics.unknown.charge;
+            };
+
+        log_final_states(
+            "electron",
+            final_electron_states
+        );
+
+        log_final_states(
+            "hole",
+            final_hole_states
+        );
+    }
 
     if(enable_coulomb_refinement_diagnostics) {
         LOG(INFO)
