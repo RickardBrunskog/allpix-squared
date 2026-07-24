@@ -76,6 +76,22 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
         )
     );
 
+    // Optionally replace the ordinary first outer drift step with a
+    // simultaneously coupled RK4 propagation on a refined temporal grid.
+    // This affects the real production trajectory, unlike the separate
+    // refinement diagnostics, which remain shadow calculations.
+    config_.setDefault<bool>(
+        "enable_coulomb_initial_step_refinement",
+        false
+    );
+
+    // Maximum refined RK4 substep is timestep divided by this factor.
+    // For timestep = 0.05 ns, factor 4096 gives approximately 12.2 fs.
+    config_.setDefault<unsigned int>(
+        "coulomb_initial_step_refinement_factor",
+        4096U
+    );
+
     // The coupled-RK4 refinement sweep is extremely expensive and should not
     // execute during ordinary production propagation unless explicitly enabled.
     config_.setDefault<bool>(
@@ -970,6 +986,48 @@ InteractivePropagationModule::propagate_together(Event* event,
         config_.get<bool>(
             "enable_coulomb_production_statistics"
         );
+
+    const bool enable_coulomb_initial_step_refinement =
+        config_.get<bool>(
+            "enable_coulomb_initial_step_refinement"
+        );
+
+    const unsigned int
+        coulomb_initial_step_refinement_factor =
+            config_.get<unsigned int>(
+                "coulomb_initial_step_refinement_factor"
+            );
+
+    if(
+        enable_coulomb_initial_step_refinement
+        && coulomb_initial_step_refinement_factor == 0U
+    ) {
+        throw ModuleError(
+            "coulomb_initial_step_refinement_factor must be "
+            "greater than zero"
+        );
+    }
+
+    if(
+        enable_coulomb_initial_step_refinement
+        && enable_coulomb_refinement_diagnostics
+    ) {
+        throw ModuleError(
+            "enable_coulomb_initial_step_refinement and "
+            "enable_coulomb_refinement_diagnostics cannot both "
+            "be enabled in the same run"
+        );
+    }
+
+    if(
+        enable_coulomb_initial_step_refinement
+        && !enable_coulomb_repulsion_
+    ) {
+        throw ModuleError(
+            "enable_coulomb_initial_step_refinement requires "
+            "enable_coulomb_repulsion = true"
+        );
+    }
 
     unsigned int propagated_charges_count = 0;
     unsigned int recombined_charges_count = 0;
@@ -2658,6 +2716,289 @@ InteractivePropagationModule::propagate_together(Event* event,
         return std::make_tuple(0U, 0U, 0U);
     }
 
+    // Advance one complete deterministic, simultaneously coupled RK4
+    // substep. The helper itself does not modify the physical propagation
+    // state, random-number engine, pulses, histograms or carrier states.
+    // Its returned positions may be used either by shadow diagnostics or
+    // committed by the production initial-step refinement.
+    const auto advance_coupled_substep  =
+        [&](const std::vector<ROOT::Math::XYZPoint>&
+                initial_positions,
+            const std::vector<std::uint8_t>&
+                active_mask,
+            double softening_length,
+            double substep_start,
+            double substep_end)
+            -> std::vector<ROOT::Math::XYZPoint> {
+
+        if(
+            initial_positions.size()
+                != propagating_charges.size()
+            || active_mask.size()
+                != propagating_charges.size()
+        ) {
+            throw ModuleError(
+                "Invalid vector size in coupled RK4 substep"
+            );
+        }
+
+        const double substep_size =
+            substep_end - substep_start;
+
+        std::vector<Eigen::Vector3d> k1(
+            propagating_charges.size(),
+            Eigen::Vector3d::Zero()
+        );
+
+        std::vector<Eigen::Vector3d> k2(
+            propagating_charges.size(),
+            Eigen::Vector3d::Zero()
+        );
+
+        std::vector<Eigen::Vector3d> k3(
+            propagating_charges.size(),
+            Eigen::Vector3d::Zero()
+        );
+
+        std::vector<Eigen::Vector3d> k4(
+            propagating_charges.size(),
+            Eigen::Vector3d::Zero()
+        );
+
+        auto stage2_positions =
+            initial_positions;
+
+        auto stage3_positions =
+            initial_positions;
+
+        auto stage4_positions =
+            initial_positions;
+
+        auto final_positions =
+            initial_positions;
+
+        const auto evaluate_stage_velocity =
+            [&](double evaluation_time,
+                unsigned int target_index,
+                const std::vector<
+                    ROOT::Math::XYZPoint
+                >& stage_positions)
+                -> Eigen::Vector3d {
+
+            const auto trial_position =
+                convertPointToVector(
+                    stage_positions[
+                        target_index
+                    ]
+                );
+
+            const auto carrier_type =
+                propagating_charges[
+                    target_index
+                ].getType();
+
+            if(has_magnetic_field_) {
+                return carrier_velocity_withB(
+                    evaluation_time,
+                    trial_position,
+                    carrier_type,
+                    target_index,
+                    stage_positions,
+                    previous_charge_states,
+                    active_mask,
+                    SourceActivationMode::
+                        EXPLICIT_MASK,
+                    softening_length,
+                    false
+                );
+            }
+
+            return carrier_velocity_noB(
+                evaluation_time,
+                trial_position,
+                carrier_type,
+                target_index,
+                stage_positions,
+                previous_charge_states,
+                active_mask,
+                SourceActivationMode::
+                    EXPLICIT_MASK,
+                softening_length,
+                false
+            );
+        };
+
+        // K1 and common stage-2 positions.
+        for(unsigned int i = 0;
+            i < propagating_charges.size();
+            i++) {
+
+            if(
+                active_mask[i] == 0U
+                || previous_charge_states[i]
+                    != CarrierState::MOTION
+            ) {
+                continue;
+            }
+
+            k1[i] =
+                evaluate_stage_velocity(
+                    substep_start,
+                    i,
+                    initial_positions
+                );
+
+            if(
+                active_refinement_statistics != nullptr
+                && i == 0U
+                && !active_refinement_statistics
+                    ->have_first_target_k1
+            ) {
+                auto& statistics =
+                    *active_refinement_statistics;
+
+                statistics.have_first_target_k1 =
+                    true;
+
+                statistics.first_target_substep_size =
+                    substep_size;
+
+                statistics.first_target_k1_velocity =
+                    k1[i];
+
+                statistics.first_target_stage2_displacement =
+                    0.5
+                    * substep_size
+                    * k1[i];
+            }
+
+            const auto initial_position =
+                convertPointToVector(
+                    initial_positions[i]
+                );
+
+            stage2_positions[i] =
+                convertVectorToPoint(
+                    initial_position
+                    + 0.5
+                        * substep_size
+                        * k1[i]
+                );
+        }
+
+        const double midpoint_time =
+            substep_start
+            + 0.5 * substep_size;
+
+        // K2 and common stage-3 positions.
+        for(unsigned int i = 0;
+            i < propagating_charges.size();
+            i++) {
+
+            if(
+                active_mask[i] == 0U
+                || previous_charge_states[i]
+                    != CarrierState::MOTION
+            ) {
+                continue;
+            }
+
+            k2[i] =
+                evaluate_stage_velocity(
+                    midpoint_time,
+                    i,
+                    stage2_positions
+                );
+
+            const auto initial_position =
+                convertPointToVector(
+                    initial_positions[i]
+                );
+
+            stage3_positions[i] =
+                convertVectorToPoint(
+                    initial_position
+                    + 0.5
+                        * substep_size
+                        * k2[i]
+                );
+        }
+
+        // K3 and common stage-4 positions.
+        for(unsigned int i = 0;
+            i < propagating_charges.size();
+            i++) {
+
+            if(
+                active_mask[i] == 0U
+                || previous_charge_states[i]
+                    != CarrierState::MOTION
+            ) {
+                continue;
+            }
+
+            k3[i] =
+                evaluate_stage_velocity(
+                    midpoint_time,
+                    i,
+                    stage3_positions
+                );
+
+            const auto initial_position =
+                convertPointToVector(
+                    initial_positions[i]
+                );
+
+            stage4_positions[i] =
+                convertVectorToPoint(
+                    initial_position
+                    + substep_size
+                        * k3[i]
+                );
+        }
+
+        // K4 and simultaneous final update.
+        for(unsigned int i = 0;
+            i < propagating_charges.size();
+            i++) {
+
+            if(
+                active_mask[i] == 0U
+                || previous_charge_states[i]
+                    != CarrierState::MOTION
+            ) {
+                continue;
+            }
+
+            k4[i] =
+                evaluate_stage_velocity(
+                    substep_end,
+                    i,
+                    stage4_positions
+                );
+
+            const auto initial_position =
+                convertPointToVector(
+                    initial_positions[i]
+                );
+
+            final_positions[i] =
+                convertVectorToPoint(
+                    initial_position
+                    + substep_size
+                        / 6.0
+                        * (
+                            k1[i]
+                            + 2.0 * k2[i]
+                            + 2.0 * k3[i]
+                            + k4[i]
+                        )
+                );
+        }
+
+        return final_positions;
+    };
+
     // Set up variables that are changed each loop
     Eigen::Vector3d efield{};
     allpix::PropagatedCharge charge = propagating_charges[0];
@@ -3069,289 +3410,6 @@ InteractivePropagationModule::propagate_together(Event* event,
                 )
                 << " ns";
 
-            // Advance one complete, deterministic, coupled RK4
-            // substep. This helper does not modify the physical
-            // propagation state, random-number engine, pulses,
-            // histograms, or charge states.
-            const auto advance_coupled_shadow_substep =
-                [&](const std::vector<ROOT::Math::XYZPoint>&
-                        initial_positions,
-                    const std::vector<std::uint8_t>&
-                        active_mask,
-                    double softening_length,
-                    double substep_start,
-                    double substep_end)
-                    -> std::vector<ROOT::Math::XYZPoint> {
-
-                if(
-                    initial_positions.size()
-                        != propagating_charges.size()
-                    || active_mask.size()
-                        != propagating_charges.size()
-                ) {
-                    throw ModuleError(
-                        "Invalid vector size in coupled RK4 "
-                        "shadow substep"
-                    );
-                }
-
-                const double substep_size =
-                    substep_end - substep_start;
-
-                std::vector<Eigen::Vector3d> k1(
-                    propagating_charges.size(),
-                    Eigen::Vector3d::Zero()
-                );
-
-                std::vector<Eigen::Vector3d> k2(
-                    propagating_charges.size(),
-                    Eigen::Vector3d::Zero()
-                );
-
-                std::vector<Eigen::Vector3d> k3(
-                    propagating_charges.size(),
-                    Eigen::Vector3d::Zero()
-                );
-
-                std::vector<Eigen::Vector3d> k4(
-                    propagating_charges.size(),
-                    Eigen::Vector3d::Zero()
-                );
-
-                auto stage2_positions =
-                    initial_positions;
-
-                auto stage3_positions =
-                    initial_positions;
-
-                auto stage4_positions =
-                    initial_positions;
-
-                auto final_positions =
-                    initial_positions;
-
-                const auto evaluate_stage_velocity =
-                    [&](double evaluation_time,
-                        unsigned int target_index,
-                        const std::vector<
-                            ROOT::Math::XYZPoint
-                        >& stage_positions)
-                        -> Eigen::Vector3d {
-
-                    const auto trial_position =
-                        convertPointToVector(
-                            stage_positions[
-                                target_index
-                            ]
-                        );
-
-                    const auto carrier_type =
-                        propagating_charges[
-                            target_index
-                        ].getType();
-
-                    if(has_magnetic_field_) {
-                        return carrier_velocity_withB(
-                            evaluation_time,
-                            trial_position,
-                            carrier_type,
-                            target_index,
-                            stage_positions,
-                            previous_charge_states,
-                            active_mask,
-                            SourceActivationMode::
-                                EXPLICIT_MASK,
-                            softening_length,
-                            false
-                        );
-                    }
-
-                    return carrier_velocity_noB(
-                        evaluation_time,
-                        trial_position,
-                        carrier_type,
-                        target_index,
-                        stage_positions,
-                        previous_charge_states,
-                        active_mask,
-                        SourceActivationMode::
-                            EXPLICIT_MASK,
-                        softening_length,
-                        false
-                    );
-                };
-
-                // K1 and common stage-2 positions.
-                for(unsigned int i = 0;
-                    i < propagating_charges.size();
-                    i++) {
-
-                    if(
-                        active_mask[i] == 0U
-                        || previous_charge_states[i]
-                            != CarrierState::MOTION
-                    ) {
-                        continue;
-                    }
-
-                    k1[i] =
-                        evaluate_stage_velocity(
-                            substep_start,
-                            i,
-                            initial_positions
-                        );
-
-                    if(
-                        active_refinement_statistics != nullptr
-                        && i == 0U
-                        && !active_refinement_statistics
-                            ->have_first_target_k1
-                    ) {
-                        auto& statistics =
-                            *active_refinement_statistics;
-
-                        statistics.have_first_target_k1 =
-                            true;
-
-                        statistics.first_target_substep_size =
-                            substep_size;
-
-                        statistics.first_target_k1_velocity =
-                            k1[i];
-
-                        statistics.first_target_stage2_displacement =
-                            0.5
-                            * substep_size
-                            * k1[i];
-                    }
-
-                    const auto initial_position =
-                        convertPointToVector(
-                            initial_positions[i]
-                        );
-
-                    stage2_positions[i] =
-                        convertVectorToPoint(
-                            initial_position
-                            + 0.5
-                                * substep_size
-                                * k1[i]
-                        );
-                }
-
-                const double midpoint_time =
-                    substep_start
-                    + 0.5 * substep_size;
-
-                // K2 and common stage-3 positions.
-                for(unsigned int i = 0;
-                    i < propagating_charges.size();
-                    i++) {
-
-                    if(
-                        active_mask[i] == 0U
-                        || previous_charge_states[i]
-                            != CarrierState::MOTION
-                    ) {
-                        continue;
-                    }
-
-                    k2[i] =
-                        evaluate_stage_velocity(
-                            midpoint_time,
-                            i,
-                            stage2_positions
-                        );
-
-                    const auto initial_position =
-                        convertPointToVector(
-                            initial_positions[i]
-                        );
-
-                    stage3_positions[i] =
-                        convertVectorToPoint(
-                            initial_position
-                            + 0.5
-                                * substep_size
-                                * k2[i]
-                        );
-                }
-
-                // K3 and common stage-4 positions.
-                for(unsigned int i = 0;
-                    i < propagating_charges.size();
-                    i++) {
-
-                    if(
-                        active_mask[i] == 0U
-                        || previous_charge_states[i]
-                            != CarrierState::MOTION
-                    ) {
-                        continue;
-                    }
-
-                    k3[i] =
-                        evaluate_stage_velocity(
-                            midpoint_time,
-                            i,
-                            stage3_positions
-                        );
-
-                    const auto initial_position =
-                        convertPointToVector(
-                            initial_positions[i]
-                        );
-
-                    stage4_positions[i] =
-                        convertVectorToPoint(
-                            initial_position
-                            + substep_size
-                                * k3[i]
-                        );
-                }
-
-                // K4 and simultaneous final update.
-                for(unsigned int i = 0;
-                    i < propagating_charges.size();
-                    i++) {
-
-                    if(
-                        active_mask[i] == 0U
-                        || previous_charge_states[i]
-                            != CarrierState::MOTION
-                    ) {
-                        continue;
-                    }
-
-                    k4[i] =
-                        evaluate_stage_velocity(
-                            substep_end,
-                            i,
-                            stage4_positions
-                        );
-
-                    const auto initial_position =
-                        convertPointToVector(
-                            initial_positions[i]
-                        );
-
-                    final_positions[i] =
-                        convertVectorToPoint(
-                            initial_position
-                            + substep_size
-                                / 6.0
-                                * (
-                                    k1[i]
-                                    + 2.0 * k2[i]
-                                    + 2.0 * k3[i]
-                                    + k4[i]
-                                )
-                        );
-                }
-
-                return final_positions;
-            };
-
              const auto
                 sequential_shadow_initial_positions =
                     previous_charge_locations;
@@ -3475,7 +3533,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     // begin from the original positions. This should reproduce
                     // the manually written final-substep-only RK4 calculation.
                     helper_final_substep_only_positions =
-                        advance_coupled_shadow_substep(
+                        advance_coupled_substep(
                             previous_charge_locations,
                             substep_source_active,
                             production_softening_length,
@@ -3488,7 +3546,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 }
 
                 sequential_shadow_positions =
-                    advance_coupled_shadow_substep(
+                    advance_coupled_substep(
                         sequential_shadow_positions,
                         substep_source_active,
                         production_softening_length,
@@ -5003,7 +5061,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             - piece_start;
 
                         refined_positions =
-                            advance_coupled_shadow_substep(
+                            advance_coupled_substep(
                                 refined_positions,
                                 interval_active_mask,
                                 refinement_softening_length,
@@ -6007,8 +6065,345 @@ InteractivePropagationModule::propagate_together(Event* event,
         // any shadow/refinement calculation above.
         active_refinement_statistics =
             production_coulomb_statistics_pointer;
-        
-        // Move all charges by a single timestep
+
+        bool initial_step_refinement_performed = false;
+
+        unsigned int
+            initial_step_refinement_committed_groups = 0U;
+
+        std::vector<ROOT::Math::XYZPoint>
+            initial_step_refined_positions;
+
+        if(
+            enable_coulomb_initial_step_refinement
+            && time == 0.0
+        ) {
+            const double refinement_step_start =
+                time;
+
+            const double refinement_step_end =
+                time + timestep_;
+
+            const double requested_maximum_substep =
+                timestep_
+                / static_cast<double>(
+                    coulomb_initial_step_refinement_factor
+                );
+
+            if(
+                !std::isfinite(requested_maximum_substep)
+                || requested_maximum_substep <= 0.0
+            ) {
+                throw ModuleError(
+                    "Invalid maximum substep for production "
+                    "initial-step refinement"
+                );
+            }
+
+            // Retain every charge-activation time inside the first outer
+            // interval. An active mask is then fixed throughout each
+            // interval, including its K4 endpoint.
+            std::vector<double> exact_boundaries;
+
+            exact_boundaries.reserve(
+                propagating_charges.size() + 2U
+            );
+
+            exact_boundaries.push_back(
+                refinement_step_start
+            );
+
+            for(const auto& charge_group :
+                propagating_charges) {
+                const double activation_time =
+                    charge_group.getLocalTime();
+
+                if(!std::isfinite(activation_time)) {
+                    throw ModuleError(
+                        "Encountered a non-finite charge activation "
+                        "time during initial-step refinement"
+                    );
+                }
+
+                if(
+                    activation_time > refinement_step_start
+                    && activation_time < refinement_step_end
+                ) {
+                    exact_boundaries.push_back(
+                        activation_time
+                    );
+                }
+            }
+
+            exact_boundaries.push_back(
+                refinement_step_end
+            );
+
+            std::sort(
+                exact_boundaries.begin(),
+                exact_boundaries.end()
+            );
+
+            exact_boundaries.erase(
+                std::unique(
+                    exact_boundaries.begin(),
+                    exact_boundaries.end()
+                ),
+                exact_boundaries.end()
+            );
+
+            const double boundary_merge_tolerance =
+                64.0
+                * std::numeric_limits<double>::epsilon()
+                * std::max(
+                    {
+                        1.0,
+                        std::abs(refinement_step_start),
+                        std::abs(refinement_step_end)
+                    }
+                );
+
+            std::vector<double> merged_boundaries;
+
+            merged_boundaries.reserve(
+                exact_boundaries.size()
+            );
+
+            for(const double boundary :
+                exact_boundaries) {
+                if(
+                    merged_boundaries.empty()
+                    || std::abs(
+                        boundary
+                        - merged_boundaries.back()
+                    ) > boundary_merge_tolerance
+                ) {
+                    merged_boundaries.push_back(
+                        boundary
+                    );
+                }
+            }
+
+            if(merged_boundaries.size() < 2U) {
+                throw ModuleError(
+                    "Production initial-step refinement did not "
+                    "produce a valid activation schedule"
+                );
+            }
+
+            initial_step_refined_positions =
+                previous_charge_locations;
+
+            std::uint64_t refined_substeps_advanced =
+                0U;
+
+            double largest_actual_substep =
+                0.0;
+
+            // Subdivide every activation interval independently. Rounding
+            // upward to a power of two keeps the temporal grid regular while
+            // ensuring that no substep exceeds the configured maximum.
+            for(
+                std::size_t interval_index = 0U;
+                interval_index + 1U
+                    < merged_boundaries.size();
+                interval_index++
+            ) {
+                const double interval_start =
+                    merged_boundaries[
+                        interval_index
+                    ];
+
+                const double interval_end =
+                    merged_boundaries[
+                        interval_index + 1U
+                    ];
+
+                const double interval_size =
+                    interval_end
+                    - interval_start;
+
+                if(interval_size <= 0.0) {
+                    throw ModuleError(
+                        "Encountered a non-positive activation "
+                        "interval during initial-step refinement"
+                    );
+                }
+
+                std::vector<std::uint8_t>
+                    interval_active_mask(
+                        propagating_charges.size(),
+                        0U
+                    );
+
+                for(
+                    unsigned int source_index = 0U;
+                    source_index
+                        < propagating_charges.size();
+                    source_index++
+                ) {
+                    if(
+                        propagating_charges[
+                            source_index
+                        ].getLocalTime()
+                        <= interval_start
+                            + boundary_merge_tolerance
+                    ) {
+                        interval_active_mask[
+                            source_index
+                        ] = 1U;
+                    }
+                }
+
+                const unsigned int
+                    required_number_of_pieces =
+                        std::max(
+                            1U,
+                            static_cast<unsigned int>(
+                                std::ceil(
+                                    interval_size
+                                    / requested_maximum_substep
+                                )
+                            )
+                        );
+
+                unsigned int number_of_pieces =
+                    1U;
+
+                while(
+                    number_of_pieces
+                    < required_number_of_pieces
+                ) {
+                    if(
+                        number_of_pieces
+                        > std::numeric_limits<
+                            unsigned int
+                        >::max() / 2U
+                    ) {
+                        throw ModuleError(
+                            "Initial-step refinement substep "
+                            "count overflow"
+                        );
+                    }
+
+                    number_of_pieces *= 2U;
+                }
+
+                for(
+                    unsigned int piece_index = 0U;
+                    piece_index < number_of_pieces;
+                    piece_index++
+                ) {
+                    const double piece_start =
+                        interval_start
+                        + interval_size
+                            * static_cast<double>(
+                                piece_index
+                            )
+                            / static_cast<double>(
+                                number_of_pieces
+                            );
+
+                    const double piece_end =
+                        piece_index + 1U
+                                == number_of_pieces
+                            ? interval_end
+                            : interval_start
+                                + interval_size
+                                    * static_cast<double>(
+                                        piece_index + 1U
+                                    )
+                                    / static_cast<double>(
+                                        number_of_pieces
+                                    );
+
+                    const double actual_substep =
+                        piece_end - piece_start;
+
+                    initial_step_refined_positions =
+                        advance_coupled_substep(
+                            initial_step_refined_positions,
+                            interval_active_mask,
+                            production_softening_length,
+                            piece_start,
+                            piece_end
+                        );
+
+                    largest_actual_substep =
+                        std::max(
+                            largest_actual_substep,
+                            actual_substep
+                        );
+
+                    refined_substeps_advanced++;
+                }
+            }
+
+            for(const auto& refined_position :
+                initial_step_refined_positions) {
+                if(
+                    !convertPointToVector(
+                        refined_position
+                    ).allFinite()
+                ) {
+                    throw ModuleError(
+                        "Production initial-step refinement "
+                        "produced a non-finite carrier position"
+                    );
+                }
+            }
+
+            initial_step_refinement_performed =
+                true;
+
+            LOG(WARNING)
+                << "[COULOMB_INITIAL_STEP_REFINEMENT]"
+                << "\n  enabled = yes"
+                << "\n  refinement factor = "
+                << coulomb_initial_step_refinement_factor
+                << "\n  production softening length = "
+                << Units::convert(
+                    production_softening_length,
+                    "nm"
+                )
+                << " nm"
+                << "\n  outer step start = "
+                << Units::convert(
+                    refinement_step_start,
+                    "ns"
+                )
+                << " ns"
+                << "\n  outer step end = "
+                << Units::convert(
+                    refinement_step_end,
+                    "ns"
+                )
+                << " ns"
+                << "\n  requested maximum substep = "
+                << std::setprecision(
+                    std::numeric_limits<double>::
+                        max_digits10
+                )
+                << Units::convert(
+                    requested_maximum_substep,
+                    "ns"
+                )
+                << " ns"
+                << "\n  largest actual substep = "
+                << Units::convert(
+                    largest_actual_substep,
+                    "ns"
+                )
+                << " ns"
+                << "\n  retained activation boundaries = "
+                << merged_boundaries.size()
+                << "\n  coupled substeps advanced = "
+                << refined_substeps_advanced;
+        }
+
+        // Move all charges by a single outer timestep. During the first
+        // interval, the deterministic drift endpoint can instead come from
+        // the simultaneously coupled refined calculation above.
         for (unsigned int i = 0; i < propagating_charges.size(); i++){
             
             // Update local variables for convenient access and reduced array calling
@@ -6068,13 +6463,92 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
 
-            // Execute a Runge-Kutta step and verify how the solver advances
-            // its internal physical time.
+            // Either commit the simultaneously coupled endpoint calculated
+            // for the first outer interval or execute the existing
+            // independent RK4 step for every later interval.
             const double rk_time_before =
                 runge_kutta.getTime();
 
-            auto step =
-                runge_kutta.step();
+            double physics_step_duration =
+                timestep_;
+
+            Eigen::Vector3d deterministic_step_value =
+                Eigen::Vector3d::Zero();
+
+            if(initial_step_refinement_performed) {
+                const double refined_step_end =
+                    time + timestep_;
+
+                physics_step_duration =
+                    refined_step_end
+                    - rk_time_before;
+
+                if(
+                    !std::isfinite(
+                        physics_step_duration
+                    )
+                    || physics_step_duration <= 0.0
+                ) {
+                    throw ModuleError(
+                        "Invalid active duration while committing "
+                        "the refined first production step"
+                    );
+                }
+
+                const Eigen::Vector3d
+                    refined_endpoint =
+                        convertPointToVector(
+                            initial_step_refined_positions[i]
+                        );
+
+                deterministic_step_value =
+                    refined_endpoint
+                    - runge_kutta.getValue();
+
+                runge_kutta.setValue(
+                    refined_endpoint
+                );
+
+                // Synchronize every carrier activated before the first
+                // interval endpoint to the common outer-step time.
+                runge_kutta.advanceTime(
+                    physics_step_duration
+                );
+
+                const double time_sync_tolerance =
+                    64.0
+                    * std::numeric_limits<double>::epsilon()
+                    * std::max(
+                        {
+                            1.0,
+                            std::abs(refined_step_end),
+                            std::abs(
+                                runge_kutta.getTime()
+                            )
+                        }
+                    );
+
+                if(
+                    std::abs(
+                        runge_kutta.getTime()
+                        - refined_step_end
+                    ) > time_sync_tolerance
+                ) {
+                    throw ModuleError(
+                        "Failed to synchronize a carrier to the "
+                        "refined first-step endpoint time"
+                    );
+                }
+
+                initial_step_refinement_committed_groups++;
+
+            } else {
+                const auto step =
+                    runge_kutta.step();
+
+                deterministic_step_value =
+                    step.value;
+            }
 
             const double rk_time_after =
                 runge_kutta.getTime();
@@ -6264,10 +6738,23 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Get the new position due to the electric field
             position = convertVectorToPoint(runge_kutta.getValue());
 
-            // Apply diffusion step (if enabled)
-            if (enable_diffusion_){
-                auto diffusion = carrier_diffusion(efield.norm(), doping, timestep_, charge.getType());
-                position = ROOT::Math::XYZPoint(position.x() + diffusion.x(), position.y() + diffusion.y(), position.z() + diffusion.z());
+            // Apply one operator-split diffusion displacement over the actual
+            // duration for which this carrier was active in the outer step.
+            if(enable_diffusion_) {
+                const auto diffusion =
+                    carrier_diffusion(
+                        efield.norm(),
+                        doping,
+                        physics_step_duration,
+                        charge.getType()
+                    );
+
+                position =
+                    ROOT::Math::XYZPoint(
+                        position.x() + diffusion.x(),
+                        position.y() + diffusion.y(),
+                        position.z() + diffusion.z()
+                    );
             }
 
             // If charge carrier reaches implant, interpolate surface position for higher accuracy:
@@ -6321,7 +6808,14 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // Update step length histogram
             if(output_plots_) {
-                step_length_histo_->Fill(static_cast<double>(Units::convert(step.value.norm(), "um")));
+                step_length_histo_->Fill(
+                    static_cast<double>(
+                        Units::convert(
+                            deterministic_step_value.norm(),
+                            "um"
+                        )
+                    )
+                );
             }
 
             // Physics effects:
@@ -6337,7 +6831,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     uniform_distribution(
                         event->getRandomEngine()
                     ),
-                    timestep_
+                    physics_step_duration
                 )
             ) {
                 state =
@@ -6351,7 +6845,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     uniform_distribution(
                         event->getRandomEngine()
                     ),
-                    timestep_,
+                    physics_step_duration,
                     efield.norm()
                 )
             ) {
@@ -6495,7 +6989,25 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         }
 
-
+        if(initial_step_refinement_performed) {
+            LOG(WARNING)
+                << "[COULOMB_INITIAL_STEP_REFINEMENT_COMMIT]"
+                << "\n  committed carrier groups = "
+                << initial_step_refinement_committed_groups
+                << "\n  committed endpoint time = "
+                << Units::convert(
+                    time + timestep_,
+                    "ns"
+                )
+                << " ns"
+                << "\n  diffusion applied after coupled drift = "
+                << (
+                    enable_diffusion_
+                        ? "yes"
+                        : "no"
+                );
+        }
+        
         active_refinement_statistics = nullptr;
 
     }
