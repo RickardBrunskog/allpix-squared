@@ -83,6 +83,13 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
         false
     );
 
+    // Accumulate statistics from Coulomb evaluations used by the actual
+    // propagation. This does not enable the expensive refinement sweep.
+    config_.setDefault<bool>(
+        "enable_coulomb_production_statistics",
+        false
+    );
+
     // Acceptance tolerances for adjacent refinement comparisons.
     config_.setDefault<double>(
         "coulomb_refinement_charge_weighted_rms_tolerance",
@@ -959,6 +966,11 @@ InteractivePropagationModule::propagate_together(Event* event,
             "enable_coulomb_refinement_diagnostics"
         );
 
+    const bool enable_coulomb_production_statistics =
+        config_.get<bool>(
+            "enable_coulomb_production_statistics"
+        );
+
     unsigned int propagated_charges_count = 0;
     unsigned int recombined_charges_count = 0;
     unsigned int trapped_charges_count = 0;
@@ -1115,6 +1127,18 @@ InteractivePropagationModule::propagate_together(Event* event,
             Eigen::Vector3d::Zero();
     };
 
+    CoulombRefinementStatistics
+        production_coulomb_statistics;
+
+    CoulombRefinementStatistics* const
+        production_coulomb_statistics_pointer =
+            enable_coulomb_production_statistics
+                ? &production_coulomb_statistics
+                : nullptr;
+
+    // This pointer selects the statistics object for the current evaluation
+    // scope. Refinement shadows and real production propagation must never
+    // write to the same accumulator.
     CoulombRefinementStatistics*
         active_refinement_statistics = nullptr;
 
@@ -1516,14 +1540,6 @@ InteractivePropagationModule::propagate_together(Event* event,
                     dist_vector =
                         physical_dist_vector;
 
-                    if(
-                        source_inside_softening_length
-                        && active_refinement_statistics != nullptr
-                    ) {
-                        active_refinement_statistics
-                            ->pairs_inside_softening_length++;
-                    }
-
                 } else if(source_overlaps_target) {
 
                     // Preserve the current deterministic exact-overlap
@@ -1612,6 +1628,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                             *active_refinement_statistics;
 
                         statistics.eligible_direct_pairs++;
+
+                        if(source_inside_softening_length) {
+                            statistics
+                                .pairs_inside_softening_length++;
+                        }
 
                         if(source_overlaps_target) {
 
@@ -2656,7 +2677,11 @@ InteractivePropagationModule::propagate_together(Event* event,
 
     // Continue time propagation until the integration time has been reached
     for(time = 0; time < integration_time_; time += timestep_) { // time is the threshold value for each iteration
-
+        
+        // No statistics accumulator is active while optional diagnostic
+        // calculations and output sampling are performed.
+        active_refinement_statistics = nullptr;
+        
         // Based on the desired output_plots_step, display integration progress and calculate rms if desired
         if(std::fmod(time, output_plots_step_) < timestep_){
             // TODO: Change output_plots_step implementation to not depend on floating point errors.
@@ -2670,11 +2695,6 @@ InteractivePropagationModule::propagate_together(Event* event,
                 // }
 
             LOG(DEBUG) << "Time has reached " << time << "ns of " << integration_time_ << "ns";
-
-            for (unsigned int i = 0; i < propagating_charges.size(); i++){
-                // Add the current position to the linegraph associated with the current charge
-                
-            }
 
             // Get RMS of the charge distribution
             if (output_rms_){
@@ -5983,7 +6003,12 @@ InteractivePropagationModule::propagate_together(Event* event,
         
         }
 
-        // Move all charges by a single timestep
+        // Statistics below this point belong to the real propagation, not to
+        // any shadow/refinement calculation above.
+        active_refinement_statistics =
+            production_coulomb_statistics_pointer;
+        
+            // Move all charges by a single timestep
         for (unsigned int i = 0; i < propagating_charges.size(); i++){
             
             // Update local variables for convenient access and reduced array calling
@@ -6470,7 +6495,56 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         }
 
+
+        active_refinement_statistics = nullptr;
+
     }
+
+    struct FinalStateCount {
+        std::uint64_t groups = 0U;
+        std::uint64_t charge = 0U;
+    };
+
+    struct FinalCarrierStateStatistics {
+        FinalStateCount motion;
+        FinalStateCount halted;
+        FinalStateCount recombined;
+        FinalStateCount trapped;
+        FinalStateCount unknown;
+    };
+
+    FinalCarrierStateStatistics final_electron_states;
+    FinalCarrierStateStatistics final_hole_states;
+
+    const auto record_final_state =
+        [](FinalCarrierStateStatistics& statistics,
+           CarrierState final_state,
+           std::uint64_t charge_count) {
+
+            FinalStateCount* destination = nullptr;
+
+            switch(final_state) {
+            case CarrierState::MOTION:
+                destination = &statistics.motion;
+                break;
+            case CarrierState::HALTED:
+                destination = &statistics.halted;
+                break;
+            case CarrierState::RECOMBINED:
+                destination = &statistics.recombined;
+                break;
+            case CarrierState::TRAPPED:
+                destination = &statistics.trapped;
+                break;
+            case CarrierState::UNKNOWN:
+            default:
+                destination = &statistics.unknown;
+                break;
+            }
+
+            destination->groups++;
+            destination->charge += charge_count;
+        };
 
     // Add final charges to propagated charges vector
     LOG(INFO) << "Outputing propagated charges";
@@ -6478,6 +6552,21 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         charge = propagating_charges[i];
         auto runge_kutta = runge_kutta_vector[i];
+
+        if(enable_coulomb_production_statistics) {
+            auto& final_state_statistics =
+                charge.getType() == CarrierType::ELECTRON
+                    ? final_electron_states
+                    : final_hole_states;
+
+            record_final_state(
+                final_state_statistics,
+                charge_states[i],
+                static_cast<std::uint64_t>(
+                    charge.getCharge()
+                )
+            );
+        }
 
         if(output_linegraphs_) {
             std::get<3>(output_plot_points.at(i).first) = charge_states[i];
@@ -6525,6 +6614,132 @@ InteractivePropagationModule::propagate_together(Event* event,
             group_size_histo_->Fill(charge.getCharge());
         }
     }
+    
+    if(enable_coulomb_production_statistics) {
+
+        const auto fraction =
+            [](std::uint64_t numerator,
+               std::uint64_t denominator) {
+                return denominator > 0U
+                    ? static_cast<double>(numerator)
+                        / static_cast<double>(denominator)
+                    : 0.0;
+            };
+
+        const std::uint64_t pair_fields_above_limit =
+            production_coulomb_statistics
+                .overlap_pair_fields_above_limit
+            + production_coulomb_statistics
+                .nonoverlap_pair_fields_above_limit;
+
+        const std::uint64_t capped_pair_fields =
+            production_coulomb_statistics
+                .capped_overlap_pairs
+            + production_coulomb_statistics
+                .capped_nonoverlap_pairs;
+
+        const double minimum_nonzero_separation =
+            std::isfinite(
+                production_coulomb_statistics
+                    .minimum_nonzero_separation
+            )
+                ? production_coulomb_statistics
+                    .minimum_nonzero_separation
+                : std::numeric_limits<double>::quiet_NaN();
+
+        LOG(WARNING)
+            << "[COULOMB_PRODUCTION_STATISTICS]"
+            << "\n  field-limit mode = "
+            << coulomb_field_limit_mode_name
+            << "\n  production softening length = "
+            << Units::convert(
+                production_softening_length,
+                "nm"
+            )
+            << " nm"
+            << "\n  field evaluations = "
+            << production_coulomb_statistics.field_evaluations
+            << "\n  eligible direct pair evaluations = "
+            << production_coulomb_statistics.eligible_direct_pairs
+            << "\n  eligible direct pairs per field evaluation = "
+            << fraction(
+                production_coulomb_statistics.eligible_direct_pairs,
+                production_coulomb_statistics.field_evaluations
+            )
+            << "\n  direct pairs inside softening length = "
+            << production_coulomb_statistics
+                .pairs_inside_softening_length
+            << "\n  inside-softening fraction of eligible direct pairs = "
+            << fraction(
+                production_coulomb_statistics
+                    .pairs_inside_softening_length,
+                production_coulomb_statistics
+                    .eligible_direct_pairs
+            )
+            << "\n  exact-overlap direct pair evaluations = "
+            << production_coulomb_statistics
+                .overlap_regularizations
+            << "\n  direct pair fields above configured limit = "
+            << pair_fields_above_limit
+            << "\n  actually capped direct pair fields = "
+            << capped_pair_fields
+            << "\n  summed fields above configured limit = "
+            << production_coulomb_statistics
+                .summed_fields_above_limit
+            << "\n  actually capped summed fields = "
+            << production_coulomb_statistics
+                .capped_summed_fields
+            << "\n  summed-field-above-limit fraction = "
+            << fraction(
+                production_coulomb_statistics
+                    .summed_fields_above_limit,
+                production_coulomb_statistics
+                    .field_evaluations
+            )
+            << "\n  actual summed-field-cap fraction = "
+            << fraction(
+                production_coulomb_statistics
+                    .capped_summed_fields,
+                production_coulomb_statistics
+                    .field_evaluations
+            )
+            << "\n  minimum nonzero direct-pair separation = "
+            << Units::convert(
+                minimum_nonzero_separation,
+                "nm"
+            )
+            << " nm"
+            << "\n  maximum uncapped overlap-pair field = "
+            << Units::convert(
+                production_coulomb_statistics
+                    .maximum_uncapped_overlap_field,
+                "V/cm"
+            )
+            << " V/cm"
+            << "\n  maximum uncapped nonoverlap-pair field = "
+            << Units::convert(
+                production_coulomb_statistics
+                    .maximum_uncapped_nonoverlap_field,
+                "V/cm"
+            )
+            << " V/cm"
+            << "\n  maximum summed field before total cap = "
+            << Units::convert(
+                production_coulomb_statistics
+                    .maximum_summed_field_before_total_cap,
+                "V/cm"
+            )
+            << " V/cm"
+            << "\n  maximum returned summed field = "
+            << Units::convert(
+                production_coulomb_statistics
+                    .maximum_returned_summed_field,
+                "V/cm"
+            )
+            << " V/cm"
+            << "\n  non-finite summed fields = "
+            << production_coulomb_statistics
+                .nonfinite_summed_fields;
 
     if(enable_coulomb_refinement_diagnostics) {
         LOG(INFO)
