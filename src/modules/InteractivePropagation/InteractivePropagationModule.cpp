@@ -5723,6 +5723,33 @@ InteractivePropagationModule::propagate_together(Event* event,
                         "V/cm"
                     )
                     << " V/cm"
+                    << "\n  maximum summed Coulomb field before total cap = "
+                    << Units::convert(
+                        refinement_statistics
+                            .maximum_summed_field_before_total_cap,
+                        "V/cm"
+                    )
+                    << " V/cm"
+                    << "\n  maximum returned summed Coulomb field = "
+                    << Units::convert(
+                        refinement_statistics
+                            .maximum_returned_summed_field,
+                        "V/cm"
+                    )
+                    << " V/cm"
+                    << "\n  summed fields above configured limit = "
+                    << refinement_statistics
+                        .summed_fields_above_limit
+                    << "\n  summed-field-above-limit fraction = "
+                    << summed_above_limit_fraction
+                    << "\n  actually capped summed fields = "
+                    << refinement_statistics
+                        .capped_summed_fields
+                    << "\n  actual summed-field-cap fraction = "
+                    << summed_cap_fraction
+                    << "\n  non-finite summed fields = "
+                    << refinement_statistics
+                        .nonfinite_summed_fields
                     << "\n  first overlap pair found = "
                     << refinement_statistics
                         .have_first_overlap_pair
