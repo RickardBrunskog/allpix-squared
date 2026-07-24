@@ -57,15 +57,33 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
         "coulomb_field_limit_mode",
         "pair"
     );
-    // Diagnostic-only Plummer softening length used during the
-    // coupled-RK4 timestep-refinement sweep. A value of zero preserves
-    // the existing point-charge/exact-overlap behavior.
+    // Production Plummer softening length for every ordinary Coulomb-field
+    // evaluation. A value of zero preserves the existing point-charge and
+    // deterministic exact-overlap behaviour.
     config_.setDefault<double>(
-        "coulomb_refinement_softening_length",
+        "coulomb_softening_length",
         Units::get(0.0, "nm")
     );
 
-    // Acceptance tolerances for adjacent softened refinement comparisons.
+    // Optional refinement-only override. If this key is not explicitly
+    // configured, the refinement calculation uses the production softening
+    // length. Existing diagnostic configurations that specify this key remain
+    // reproducible while ordinary propagation stays unsoftened by default.
+    config_.setDefault<double>(
+        "coulomb_refinement_softening_length",
+        config_.get<double>(
+            "coulomb_softening_length"
+        )
+    );
+
+    // The coupled-RK4 refinement sweep is extremely expensive and should not
+    // execute during ordinary production propagation unless explicitly enabled.
+    config_.setDefault<bool>(
+        "enable_coulomb_refinement_diagnostics",
+        false
+    );
+
+    // Acceptance tolerances for adjacent refinement comparisons.
     config_.setDefault<double>(
         "coulomb_refinement_charge_weighted_rms_tolerance",
         Units::get(1.0, "nm")
@@ -718,163 +736,170 @@ void InteractivePropagationModule::run(Event* event) {
             << " total)";
     }
 
-    // Diagnose the temporal structure that a fully coupled RK4
-    // implementation must handle. Splitting one deposit into many
-    // charge groups produces repeated entries with the same activation
-    // time, so the number of unique times can be much smaller than the
-    // number of groups.
-    std::map<double, unsigned int>
-        groups_by_deposition_time;
+    const bool enable_coulomb_refinement_diagnostics =
+        config_.get<bool>(
+            "enable_coulomb_refinement_diagnostics"
+        );
 
-    for(const auto& propagating_charge :
-        propagating_charges) {
+    if(enable_coulomb_refinement_diagnostics) {
+        // Diagnose the temporal structure that a fully coupled RK4
+        // implementation must handle. Splitting one deposit into many
+        // charge groups produces repeated entries with the same activation
+        // time, so the number of unique times can be much smaller than the
+        // number of groups.
+        std::map<double, unsigned int>
+            groups_by_deposition_time;
 
-        groups_by_deposition_time[
-            propagating_charge.getLocalTime()
-        ]++;
-    }
+        for(const auto& propagating_charge :
+            propagating_charges) {
 
-    if(!groups_by_deposition_time.empty()) {
-
-        const double earliest_deposition_time =
-            groups_by_deposition_time.begin()->first;
-
-        const double latest_deposition_time =
-            groups_by_deposition_time.rbegin()->first;
-
-        unsigned int groups_active_at_zero = 0;
-        unsigned int groups_active_by_midpoint = 0;
-        unsigned int groups_active_before_step_end = 0;
-
-        for(const auto& [
-                deposition_time,
-                number_of_groups
-            ] : groups_by_deposition_time) {
-
-            if(deposition_time <= 0.0) {
-                groups_active_at_zero +=
-                    number_of_groups;
-            }
-
-            if(deposition_time <=
-            0.5 * timestep_) {
-
-                groups_active_by_midpoint +=
-                    number_of_groups;
-            }
-
-            if(deposition_time <
-            timestep_) {
-
-                groups_active_before_step_end +=
-                    number_of_groups;
-            }
+            groups_by_deposition_time[
+                propagating_charge.getLocalTime()
+            ]++;
         }
 
-        const double deposition_time_span =
-            latest_deposition_time
-            - earliest_deposition_time;
+        if(!groups_by_deposition_time.empty()) {
 
-        LOG(WARNING)
-            << "[COUPLED_RK4_ACTIVATION_SUMMARY]"
-            << "\n  total charge groups = "
-            << propagating_charges.size()
-            << "\n  unique exact deposition times = "
-            << groups_by_deposition_time.size()
-            << "\n  earliest deposition time = "
-            << Units::convert(
-                earliest_deposition_time,
-                "ns"
-            )
-            << " ns"
-            << "\n  latest deposition time = "
-            << Units::convert(
-                latest_deposition_time,
-                "ns"
-            )
-            << " ns"
-            << "\n  deposition-time span = "
-            << Units::convert(
-                deposition_time_span,
-                "ns"
-            )
-            << " ns"
-            << "\n  configured timestep = "
-            << Units::convert(
-                timestep_,
-                "ns"
-            )
-            << " ns"
-            << "\n  span / timestep = "
-            << deposition_time_span
-                / timestep_
-            << "\n  groups active at t = 0 = "
-            << groups_active_at_zero
-            << "\n  groups active by K2/K3 midpoint = "
-            << groups_active_by_midpoint
-            << "\n  groups deposited before first step end = "
-            << groups_active_before_step_end;
+            const double earliest_deposition_time =
+                groups_by_deposition_time.begin()->first;
 
-        unsigned int displayed_times = 0;
+            const double latest_deposition_time =
+                groups_by_deposition_time.rbegin()->first;
 
-        for(const auto& [
-                deposition_time,
-                number_of_groups
-            ] : groups_by_deposition_time) {
+            unsigned int groups_active_at_zero = 0;
+            unsigned int groups_active_by_midpoint = 0;
+            unsigned int groups_active_before_step_end = 0;
 
-            if(displayed_times >= 20) {
-                break;
+            for(const auto& [
+                    deposition_time,
+                    number_of_groups
+                ] : groups_by_deposition_time) {
+
+                if(deposition_time <= 0.0) {
+                    groups_active_at_zero +=
+                        number_of_groups;
+                }
+
+                if(deposition_time <=
+                0.5 * timestep_) {
+
+                    groups_active_by_midpoint +=
+                        number_of_groups;
+                }
+
+                if(deposition_time <
+                timestep_) {
+
+                    groups_active_before_step_end +=
+                        number_of_groups;
+                }
             }
 
+            const double deposition_time_span =
+                latest_deposition_time
+                - earliest_deposition_time;
+
             LOG(WARNING)
-                << "[COUPLED_RK4_ACTIVATION_TIME]"
-                << "\n  activation index = "
-                << displayed_times
-                << "\n  deposition time = "
-                << std::setprecision(
-                    std::numeric_limits<double>::max_digits10
-                )
+                << "[COUPLED_RK4_ACTIVATION_SUMMARY]"
+                << "\n  total charge groups = "
+                << propagating_charges.size()
+                << "\n  unique exact deposition times = "
+                << groups_by_deposition_time.size()
+                << "\n  earliest deposition time = "
                 << Units::convert(
-                    deposition_time,
+                    earliest_deposition_time,
                     "ns"
                 )
                 << " ns"
-                << "\n  groups at this time = "
-                << number_of_groups;
+                << "\n  latest deposition time = "
+                << Units::convert(
+                    latest_deposition_time,
+                    "ns"
+                )
+                << " ns"
+                << "\n  deposition-time span = "
+                << Units::convert(
+                    deposition_time_span,
+                    "ns"
+                )
+                << " ns"
+                << "\n  configured timestep = "
+                << Units::convert(
+                    timestep_,
+                    "ns"
+                )
+                << " ns"
+                << "\n  span / timestep = "
+                << deposition_time_span
+                    / timestep_
+                << "\n  groups active at t = 0 = "
+                << groups_active_at_zero
+                << "\n  groups active by K2/K3 midpoint = "
+                << groups_active_by_midpoint
+                << "\n  groups deposited before first step end = "
+                << groups_active_before_step_end;
 
-            displayed_times++;
+            unsigned int displayed_times = 0;
+
+            for(const auto& [
+                    deposition_time,
+                    number_of_groups
+                ] : groups_by_deposition_time) {
+
+                if(displayed_times >= 20) {
+                    break;
+                }
+
+                LOG(WARNING)
+                    << "[COUPLED_RK4_ACTIVATION_TIME]"
+                    << "\n  activation index = "
+                    << displayed_times
+                    << "\n  deposition time = "
+                    << std::setprecision(
+                        std::numeric_limits<double>::max_digits10
+                    )
+                    << Units::convert(
+                        deposition_time,
+                        "ns"
+                    )
+                    << " ns"
+                    << "\n  groups at this time = "
+                    << number_of_groups;
+
+                displayed_times++;
+            }
         }
-    }
 
-    LOG(WARNING)
-        << "[COULOMB_DEBUG_EVENT]"
-        << "\n  event number = "
-        << event->number
-        << "\n  total deposited charge = "
-        << total_deposited_charge
-        << " e"
-        << "\n  charge_per_step configured = "
-        << charge_per_step_
-        << "\n  charge_per_step actually used = "
-        << charge_per_step
-        << "\n  max_charge_groups = "
-        << max_charge_groups_
-        << "\n  number of propagating groups = "
-        << propagating_charges.size()
-        << "\n  Coulomb enabled = "
-        << enable_coulomb_repulsion_
-        << "\n  distance cutoff, internal = "
-        << std::sqrt(
-            coulomb_distance_limit_squared_
-        )
-        << "\n  distance cutoff = "
-        << Units::convert(
-            std::sqrt(
+        LOG(WARNING)
+            << "[COULOMB_DEBUG_EVENT]"
+            << "\n  event number = "
+            << event->number
+            << "\n  total deposited charge = "
+            << total_deposited_charge
+            << " e"
+            << "\n  charge_per_step configured = "
+            << charge_per_step_
+            << "\n  charge_per_step actually used = "
+            << charge_per_step
+            << "\n  max_charge_groups = "
+            << max_charge_groups_
+            << "\n  number of propagating groups = "
+            << propagating_charges.size()
+            << "\n  Coulomb enabled = "
+            << enable_coulomb_repulsion_
+            << "\n  distance cutoff, internal = "
+            << std::sqrt(
                 coulomb_distance_limit_squared_
-            ),
-            "um"
-        )
-        << " um";
+            )
+            << "\n  distance cutoff = "
+            << Units::convert(
+                std::sqrt(
+                    coulomb_distance_limit_squared_
+                ),
+                "um"
+            )
+            << " um";
+    }
     // Propagation occurs within the following function call
     auto [recombined_charges_count, trapped_charges_count, propagated_charges_count] = propagate_together(event, propagating_charges, propagated_charges, propagation_summaries, output_plot_points);
 
@@ -928,6 +953,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                                                  std::vector<PropagatedCharge>& propagated_charges,
                                                  std::vector<PropagationSummary>& propagation_summaries,
                                                  LineGraph::OutputPlotPoints& output_plot_points) const {
+    
+    const bool enable_coulomb_refinement_diagnostics =
+        config_.get<bool>(
+            "enable_coulomb_refinement_diagnostics"
+        );
 
     unsigned int propagated_charges_count = 0;
     unsigned int recombined_charges_count = 0;
@@ -1094,16 +1124,62 @@ InteractivePropagationModule::propagate_together(Event* event,
     const double overlap_distance =
         std::sqrt(1e-15); // Internal distance unit: mm
 
+    const double production_softening_length =
+        config_.get<double>(
+            "coulomb_softening_length"
+        );
+
+    if(
+        !std::isfinite(
+            production_softening_length
+        )
+        || production_softening_length < 0.0
+    ) {
+        throw ModuleError(
+            "coulomb_softening_length must be finite "
+            "and non-negative"
+        );
+    }
+
     const double refinement_softening_length =
         config_.get<double>(
             "coulomb_refinement_softening_length"
         );
 
-    if(refinement_softening_length < 0.0) {
+    if(
+        !std::isfinite(
+            refinement_softening_length
+        )
+        || refinement_softening_length < 0.0
+    ) {
         throw ModuleError(
-            "coulomb_refinement_softening_length "
-            "cannot be negative"
+            "coulomb_refinement_softening_length must be "
+            "finite and non-negative"
         );
+    }
+
+    if(enable_coulomb_refinement_diagnostics) {
+        LOG(WARNING)
+            << "[COULOMB_SOFTENING_CONFIGURATION]"
+            << "\n  production softening length = "
+            << Units::convert(
+                production_softening_length,
+                "nm"
+            )
+            << " nm"
+            << "\n  refinement softening length = "
+            << Units::convert(
+                refinement_softening_length,
+                "nm"
+            )
+            << " nm"
+            << "\n  refinement override differs from production = "
+            << (
+                refinement_softening_length
+                        != production_softening_length
+                    ? "yes"
+                    : "no"
+            );
     }
 
     const double refinement_charge_weighted_rms_tolerance =
@@ -1129,11 +1205,6 @@ InteractivePropagationModule::propagate_together(Event* event,
             "cannot be negative"
         );
     }
-
-    const double
-        refinement_softening_length_squared =
-            refinement_softening_length
-            * refinement_softening_length;
 
     // SplitMix64 is used only to construct stable pair-dependent directions.
     // It does not modify the event random-number engine.
@@ -1266,12 +1337,20 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<allpix::CarrierState>& source_states,
             const std::vector<std::uint8_t>& source_active,
             SourceActivationMode activation_mode,
+            double softening_length,
             bool record_diagnostics)
             -> Eigen::Vector3d {
 
         const bool debug_this_call =
             record_diagnostics
             && coulomb_debug_call_count < 20;
+
+        const bool use_softening =
+            softening_length > 0.0;
+
+        const double softening_length_squared =
+            softening_length
+            * softening_length;
 
         unsigned int debug_sources_total = 0;
         unsigned int debug_sources_future = 0;
@@ -1285,7 +1364,10 @@ InteractivePropagationModule::propagate_together(Event* event,
         unsigned int debug_sources_inactive = 0;
 
 
-        auto coulomb_start = std::chrono::system_clock::now();
+        const auto coulomb_start =
+            record_diagnostics
+                ? std::chrono::system_clock::now()
+                : std::chrono::system_clock::time_point{};
 
         ROOT::Math::XYZVector field = ROOT::Math::XYZVector(0,0,0);
 
@@ -1382,8 +1464,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                 continue;
             }
 
-            // Keep the actual physical pair separation available even when
-            // the refinement-only core later substitutes an effective vector.
+            // Keep the actual physical pair separation available. The
+            // softened kernel uses this vector directly, while the unsoftened
+            // exact-overlap branch can substitute a deterministic vector.
             local_position =
                 source_positions[i];
 
@@ -1405,15 +1488,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                 target_index != i
                 && physical_dist_mag2 == 0.0;
 
-            const bool use_refinement_softening =
-                active_refinement_statistics != nullptr
-                && refinement_softening_length > 0.0;
-
             const bool source_inside_softening_length =
                 target_index != i
-                && use_refinement_softening
+                && use_softening
                 && physical_dist_mag2
-                    < refinement_softening_length_squared;
+                    < softening_length_squared;
 
             if(source_overlaps_target) {
                 debug_sources_overlapping++;
@@ -1429,7 +1508,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                 debug_sources_self++;
             } else {
 
-                if(use_refinement_softening) {
+                if(use_softening) {
 
                     // The softened kernel always uses the real physical pair vector.
                     // At exact overlap this vector is zero, producing zero pair field
@@ -1437,15 +1516,18 @@ InteractivePropagationModule::propagate_together(Event* event,
                     dist_vector =
                         physical_dist_vector;
 
-                    if(source_inside_softening_length) {
+                    if(
+                        source_inside_softening_length
+                        && active_refinement_statistics != nullptr
+                    ) {
                         active_refinement_statistics
                             ->pairs_inside_softening_length++;
                     }
 
                 } else if(source_overlaps_target) {
 
-                    // Preserve the current exact-overlap behavior outside the
-                    // diagnostic softening sweep.
+                    // Preserve the current deterministic exact-overlap
+                    // behaviour whenever softening is disabled.
                     dist_vector =
                         deterministic_overlap_separation(
                             target_index,
@@ -1463,7 +1545,7 @@ InteractivePropagationModule::propagate_together(Event* event,
 
                 if(
                     dist_mag2 <= 0.0
-                    && !use_refinement_softening
+                    && !use_softening
                 ) {
                     debug_sources_zero_distance++;
 
@@ -1488,11 +1570,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                     double uncapped_interaction_magnitude =
                         0.0;
 
-                    if(use_refinement_softening) {
+                    if(use_softening) {
 
                         const double softened_radius_squared =
                             dist_mag2
-                            + refinement_softening_length_squared;
+                            + softening_length_squared;
 
                         const double softened_radius_cubed =
                             softened_radius_squared
@@ -1789,11 +1871,35 @@ InteractivePropagationModule::propagate_together(Event* event,
                 dist_mag =
                     ROOT::Math::sqrt(dist_mag2);
 
-                const double uncapped_mirror_magnitude =
-                    coulomb_K_
-                    / relative_permittivity_
-                    * static_cast<double>(q)
-                    / dist_mag2;
+                double uncapped_mirror_magnitude = 0.0;
+
+                if(use_softening) {
+
+                    const double softened_radius_squared =
+                        dist_mag2
+                        + softening_length_squared;
+
+                    const double softened_radius_cubed =
+                        softened_radius_squared
+                        * ROOT::Math::sqrt(
+                            softened_radius_squared
+                        );
+
+                    uncapped_mirror_magnitude =
+                        coulomb_K_
+                        / relative_permittivity_
+                        * static_cast<double>(q)
+                        * dist_mag
+                        / softened_radius_cubed;
+
+                } else {
+
+                    uncapped_mirror_magnitude =
+                        coulomb_K_
+                        / relative_permittivity_
+                        * static_cast<double>(q)
+                        / dist_mag2;
+                }
 
                 const double mirror_magnitude =
                     use_pairwise_field_cap
@@ -1822,11 +1928,35 @@ InteractivePropagationModule::propagate_together(Event* event,
                 dist_mag =
                     ROOT::Math::sqrt(dist_mag2);
 
-                const double uncapped_mirror_magnitude =
-                    coulomb_K_
-                    / relative_permittivity_
-                    * static_cast<double>(q)
-                    / dist_mag2;
+                double uncapped_mirror_magnitude = 0.0;
+
+                if(use_softening) {
+
+                    const double softened_radius_squared =
+                        dist_mag2
+                        + softening_length_squared;
+
+                    const double softened_radius_cubed =
+                        softened_radius_squared
+                        * ROOT::Math::sqrt(
+                            softened_radius_squared
+                        );
+
+                    uncapped_mirror_magnitude =
+                        coulomb_K_
+                        / relative_permittivity_
+                        * static_cast<double>(q)
+                        * dist_mag
+                        / softened_radius_cubed;
+
+                } else {
+
+                    uncapped_mirror_magnitude =
+                        coulomb_K_
+                        / relative_permittivity_
+                        * static_cast<double>(q)
+                        / dist_mag2;
+                }
 
                 const double mirror_magnitude =
                     use_pairwise_field_cap
@@ -2062,6 +2192,18 @@ InteractivePropagationModule::propagate_together(Event* event,
                 << propagating_charges.size()
                 << "\n  Coulomb enabled = "
                 << enable_coulomb_repulsion_
+                << "\n  softening length = "
+                << Units::convert(
+                    softening_length,
+                    "nm"
+                )
+                << " nm"
+                << "\n  softened kernel enabled = "
+                << (
+                    use_softening
+                        ? "yes"
+                        : "no"
+                )
                 << "\n  cutoff, internal = "
                 << std::sqrt(
                     coulomb_distance_limit_squared_
@@ -2173,6 +2315,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<allpix::CarrierState>&,
             const std::vector<std::uint8_t>&,
             SourceActivationMode,
+            double,
             bool
         )
     > carrier_velocity_noB =
@@ -2184,6 +2327,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<allpix::CarrierState>& source_states,
             const std::vector<std::uint8_t>& source_active,
             SourceActivationMode activation_mode,
+            double softening_length,
             bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
@@ -2211,6 +2355,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             source_states,
             source_active,
             activation_mode,
+            softening_length,
             record_coulomb_diagnostics
         );
 
@@ -2238,6 +2383,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<allpix::CarrierState>&,
             const std::vector<std::uint8_t>&,
             SourceActivationMode,
+            double,
             bool
         )
     > carrier_velocity_withB =
@@ -2249,6 +2395,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             const std::vector<allpix::CarrierState>& source_states,
             const std::vector<std::uint8_t>& source_active,
             SourceActivationMode activation_mode,
+            double softening_length,
             bool record_coulomb_diagnostics)
             -> Eigen::Vector3d {
 
@@ -2276,6 +2423,7 @@ InteractivePropagationModule::propagate_together(Event* event,
             source_states,
             source_active,
             activation_mode,
+            softening_length,
             record_coulomb_diagnostics
         );
 
@@ -2401,7 +2549,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                     previous_charge_states,
                     all_sources_enabled,
                     SourceActivationMode::DEPOSITION_TIME,
-                    true
+                    production_softening_length,
+                    enable_coulomb_refinement_diagnostics
                 );
             };
         } else {
@@ -2420,7 +2569,8 @@ InteractivePropagationModule::propagate_together(Event* event,
                     previous_charge_states,
                     all_sources_enabled,
                     SourceActivationMode::DEPOSITION_TIME,
-                    true
+                    production_softening_length,
+                    enable_coulomb_refinement_diagnostics
                 );
             };
         }
@@ -2797,7 +2947,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                 charge_states[i];
         }
 
-        if(time == 0.0) {
+        if(
+            enable_coulomb_refinement_diagnostics
+            && time == 0.0
+        ) {
 
             const double step_start =
                 time;
@@ -2905,6 +3058,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                         initial_positions,
                     const std::vector<std::uint8_t>&
                         active_mask,
+                    double softening_length,
                     double substep_start,
                     double substep_end)
                     -> std::vector<ROOT::Math::XYZPoint> {
@@ -2987,6 +3141,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             active_mask,
                             SourceActivationMode::
                                 EXPLICIT_MASK,
+                            softening_length,
                             false
                         );
                     }
@@ -3001,6 +3156,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                         active_mask,
                         SourceActivationMode::
                             EXPLICIT_MASK,
+                        softening_length,
                         false
                     );
                 };
@@ -3302,6 +3458,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                         advance_coupled_shadow_substep(
                             previous_charge_locations,
                             substep_source_active,
+                            production_softening_length,
                             substep_start,
                             substep_end
                         );
@@ -3314,6 +3471,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                     advance_coupled_shadow_substep(
                         sequential_shadow_positions,
                         substep_source_active,
+                        production_softening_length,
                         substep_start,
                         substep_end
                     );
@@ -3371,6 +3529,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             previous_charge_states,
                             substep_source_active,
                             SourceActivationMode::EXPLICIT_MASK,
+                            production_softening_length,
                             false
                         );
 
@@ -3383,6 +3542,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             previous_charge_states,
                             substep_source_active,
                             SourceActivationMode::DEPOSITION_TIME,
+                            production_softening_length,
                             false
                         );
 
@@ -3527,6 +3687,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                     substep_source_active,
                                     SourceActivationMode::
                                         EXPLICIT_MASK,
+                                    production_softening_length,
                                     false
                                 );
                         } else {
@@ -3541,6 +3702,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                     substep_source_active,
                                     SourceActivationMode::
                                         EXPLICIT_MASK,
+                                    production_softening_length,
                                     false
                                 );
                         }
@@ -3623,6 +3785,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 substep_source_active,
                                 SourceActivationMode::
                                     EXPLICIT_MASK,
+                                production_softening_length,
                                 false
                             );
                         }
@@ -3637,6 +3800,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             substep_source_active,
                             SourceActivationMode::
                                 EXPLICIT_MASK,
+                            production_softening_length,
                             false
                         );
                     };
@@ -3848,6 +4012,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 substep_source_active,
                                 SourceActivationMode::
                                     EXPLICIT_MASK,
+                                production_softening_length,
                                 false
                             );
                         }
@@ -3862,6 +4027,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             substep_source_active,
                             SourceActivationMode::
                                 EXPLICIT_MASK,
+                            production_softening_length,
                             false
                         );
                     };
@@ -4007,6 +4173,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 substep_source_active,
                                 SourceActivationMode::
                                     EXPLICIT_MASK,
+                                production_softening_length,
                                 false
                             );
 
@@ -4021,6 +4188,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                                 substep_source_active,
                                 SourceActivationMode::
                                     EXPLICIT_MASK,
+                                production_softening_length,
                                 false
                             );
 
@@ -4624,26 +4792,16 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Test convergence of the coupled deterministic endpoint while
             // retaining every merged charge-activation boundary.
             const std::vector<unsigned int> refinement_factors = {
-                2U,
-                4U,
-                8U,
-                16U,
-                32U,
-                64U,
-                128U,
-                256U,
-                512U,
-                1024U,
-                2048U,
-                4096U
+                4096U,
+                8192U
             };
 
             
 
-            // The previous endpoint initially contains the unsoftened
-            // sequential shadow. The first refinement result is therefore
-            // NOT an adjacent softened convergence comparison. All later
-            // entries compare adjacent softened calculations on nested grids.
+            // The previous endpoint initially contains the sequential production-shadow
+            // result. The first refinement result is therefore not an adjacent refinement
+            // comparison. All later entries compare adjacent refinement calculations on
+            // nested grids.
             auto previous_refinement_positions =
                 sequential_shadow_positions;
 
@@ -4828,6 +4986,7 @@ InteractivePropagationModule::propagate_together(Event* event,
                             advance_coupled_shadow_substep(
                                 refined_positions,
                                 interval_active_mask,
+                                refinement_softening_length,
                                 piece_start,
                                 piece_end
                             );
@@ -5176,22 +5335,21 @@ InteractivePropagationModule::propagate_together(Event* event,
                         refined_target_position
                         - previous_target_position;
 
+
                 const std::string comparison_reference =
-                    refinement_factor
+                    refinement_factor 
                             == refinement_factors.front()
-                        ? "unsoftened sequential shadow; "
-                        "NOT an adjacent softened comparison"
-                        : std::string(
-                            "softened refinement factor "
-                        )
+                        ? "production sequential shadow; "
+                        "NOT an adjacent refinement comparison"
+                        : std::string("refinement factor ")
                             + std::to_string(
                                     refinement_factor / 2U
                                 );
 
                 // A convergence decision is valid only when comparing two
-                // adjacent softened calculations. The first factor instead
-                // compares against the unsoftened sequential shadow.
-                const bool is_adjacent_softened_comparison =
+                // adjacent refinement calculations. The first factor instead
+                // compares against the sequential production shadow.
+                const bool is_adjacent_refinement_comparison =
                     refinement_factor
                         != refinement_factors.front();
 
@@ -5217,14 +5375,14 @@ InteractivePropagationModule::propagate_together(Event* event,
                         <= refinement_max_endpoint_tolerance;
 
                 const bool convergence_accepted =
-                    is_adjacent_softened_comparison
+                    is_adjacent_refinement_comparison
                     && has_comparison_data
                     && finite_positions_pass
                     && charge_weighted_rms_pass
                     && maximum_endpoint_pass;
 
                 const std::string acceptance_result =
-                    !is_adjacent_softened_comparison
+                    !is_adjacent_refinement_comparison
                         ? "NOT_EVALUATED"
                         : convergence_accepted
                             ? "PASS"
@@ -5391,9 +5549,9 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << refinement_factor
                     << "\n  comparison reference = "
                     << comparison_reference
-                    << "\n  adjacent softened comparison = "
+                    << "\n  adjacent refinement comparison = "
                     << (
-                        is_adjacent_softened_comparison
+                        is_adjacent_refinement_comparison
                             ? "yes"
                             : "no"
                     )
@@ -5879,8 +6037,10 @@ InteractivePropagationModule::propagate_together(Event* event,
                 previous_charge_states,
                 all_sources_enabled,
                 SourceActivationMode::DEPOSITION_TIME,
-                true
+                production_softening_length,
+                enable_coulomb_refinement_diagnostics
             );
+
             auto doping = detector_->getDopingConcentration(position); //TODO: Does doping affect the dynamic field at all?
 
             // Execute a Runge-Kutta step and verify how the solver advances
@@ -5894,7 +6054,11 @@ InteractivePropagationModule::propagate_together(Event* event,
             const double rk_time_after =
                 runge_kutta.getTime();
 
-            if(time == 0.0 && i == 0U) {
+            if(
+                enable_coulomb_refinement_diagnostics
+                && time == 0.0
+                && i == 0U
+            ) {
 
                 if(
                     !have_first_step_sequential_target_position
@@ -6033,7 +6197,11 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << " um";
             }
 
-            if(time == 0.0 && i < 4) {
+            if(
+                enable_coulomb_refinement_diagnostics
+                && time == 0.0
+                && i < 4
+            ) {
                 LOG(WARNING)
                     << "[RK4_TIME_ADVANCE_DEBUG]"
                     << "\n  target group index = "
@@ -6358,7 +6526,12 @@ InteractivePropagationModule::propagate_together(Event* event,
         }
     }
 
-    LOG(INFO) << "The running of the coulomb_efield function took a combined " << time_spent_coulomb.count()/1e6 << "ms";
+    if(enable_coulomb_refinement_diagnostics) {
+        LOG(INFO)
+            << "The running of the coulomb_efield function took a combined "
+            << time_spent_coulomb.count() / 1e6
+            << "ms";
+    }
 
     return std::make_tuple(recombined_charges_count,trapped_charges_count,propagated_charges_count);
 }
