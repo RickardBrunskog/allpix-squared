@@ -5000,8 +5000,9 @@ InteractivePropagationModule::propagate_together(Event* event,
             // Test convergence of the coupled deterministic endpoint while
             // retaining every merged charge-activation boundary.
             const std::vector<unsigned int> refinement_factors = {
-                4096U,
-                8192U
+                1024U,
+                2048U,
+                4096U
             };
 
             
