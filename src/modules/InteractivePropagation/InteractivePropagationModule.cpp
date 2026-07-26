@@ -3164,6 +3164,10 @@ InteractivePropagationModule::propagate_together(Event* event,
         return diffused_positions;
     };
 
+    if(propagating_charges.empty()) {
+        return std::make_tuple(0U, 0U, 0U);
+    }
+
     // Set up variables that are changed each loop
     Eigen::Vector3d efield{};
     allpix::PropagatedCharge charge = propagating_charges[0];
