@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 # CMake file for the Weighting Potential Generator of the Allpix Squared framework
-CMAKE_MINIMUM_REQUIRED(VERSION 3.6.3 FATAL_ERROR)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.22.1 FATAL_ERROR)
 IF(COMMAND CMAKE_POLICY)
     CMAKE_POLICY(SET CMP0003 NEW) # change linker path search behaviour
     CMAKE_POLICY(SET CMP0048 NEW) # set project version
@@ -35,8 +35,9 @@ ADD_EXECUTABLE(
     ${ALLPIX_SRC}/core/utils/log.cpp
     ${ALLPIX_SRC}/core/utils/text.cpp
     ${ALLPIX_SRC}/core/utils/unit.cpp
-    ${ALLPIX_SRC}/core/config/ConfigReader.cpp
+    ${ALLPIX_SRC}/core/config/ConfigStack.cpp
     ${ALLPIX_SRC}/core/config/Configuration.cpp
+    ${ALLPIX_SRC}/core/config/FileParser.cpp
     ${ALLPIX_SRC}/core/config/exceptions.cpp
     ${ALLPIX_SRC}/core/geometry/DetectorModel.cpp
     ${ALLPIX_SRC}/core/geometry/PixelDetectorModel.cpp

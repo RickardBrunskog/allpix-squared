@@ -17,7 +17,6 @@
 
 #include "GeometryConstructionG4.hpp"
 #include "PassiveMaterialConstructionG4.hpp"
-#include "core/config/ConfigReader.hpp"
 #include "core/config/Configuration.hpp"
 
 #include "core/geometry/GeometryManager.hpp"
@@ -49,6 +48,8 @@ namespace allpix {
          * @brief Initializes Geant4 and construct the Geant4 geometry from the internal geometry
          */
         void initialize() override;
+
+        virtual ~GeometryBuilderGeant4Module();
 
     private:
         GeometryManager* geo_manager_;

@@ -701,8 +701,7 @@ TransientPropagationModule::propagate(Event* event,
 
     // Add point of deposition to the output plots if requested
     if(output_linegraphs_) {
-        output_plot_points.emplace_back(std::make_tuple(deposit.getGlobalTime(), charge, type, CarrierState::MOTION),
-                                        std::vector<ROOT::Math::XYZPoint>());
+        output_plot_points.emplace_back(deposit.getGlobalTime(), charge, type, CarrierState::MOTION);
     }
     auto output_plot_index = output_plot_points.size() - 1;
 
@@ -781,8 +780,9 @@ TransientPropagationModule::propagate(Event* event,
         if(output_linegraphs_) { // Set final state of charge carrier for plotting:
             auto time_idx = static_cast<size_t>(runge_kutta.getTime() / output_plots_step_);
             while(next_idx <= time_idx) {
-                output_plot_points.at(output_plot_index).second.push_back(static_cast<ROOT::Math::XYZPoint>(position));
-                next_idx = output_plot_points.at(output_plot_index).second.size();
+                output_plot_points.at(output_plot_index)
+                    .addPoint(static_cast<ROOT::Math::XYZPoint>(position), initial_time_local + runge_kutta.getTime());
+                next_idx = output_plot_points.at(output_plot_index).getNPoints();
             }
         }
 
@@ -1097,9 +1097,9 @@ TransientPropagationModule::propagate(Event* event,
     if(output_linegraphs_) {
         // If drift time is larger than integration time or the charge carriers have been collected at the backside, reset:
         if(runge_kutta.getTime() >= integration_time_ || last_position.z() < -model_->getSensorSize().z() * 0.45) {
-            std::get<3>(output_plot_points.at(output_plot_index).first) = CarrierState::UNKNOWN;
+            output_plot_points.at(output_plot_index).updateState(CarrierState::UNKNOWN);
         } else {
-            std::get<3>(output_plot_points.at(output_plot_index).first) = state;
+            output_plot_points.at(output_plot_index).updateState(state);
         }
     }
 
@@ -1148,45 +1148,5 @@ void TransientPropagationModule::finalize() {
               << max_charge_groups_ << " charge groups allowed, with a charge_per_step value of " << charge_per_step_ << ".";
     if(output_plots_) {
         group_size_histo_->Get()->GetXaxis()->SetRange(1, group_size_histo_->Get()->GetNbinsX() + 1);
-
-        potential_difference_->Write();
-        step_length_histo_->Write();
-        group_size_histo_->Write();
-        drift_time_histo_->Write();
-        recombine_histo_->Write();
-        recombination_time_histo_->Write();
-        trapped_histo_->Write();
-        trapping_time_histo_->Write();
-        induced_charge_histo_->Write();
-        induced_charge_e_histo_->Write();
-        induced_charge_h_histo_->Write();
-        if(!multiplication_.is<NoImpactIonization>()) {
-            induced_charge_primary_histo_->Write();
-            induced_charge_primary_e_histo_->Write();
-            induced_charge_primary_h_histo_->Write();
-            induced_charge_secondary_histo_->Write();
-            induced_charge_secondary_e_histo_->Write();
-            induced_charge_secondary_h_histo_->Write();
-        }
-        induced_charge_vs_depth_histo_->Write();
-        induced_charge_e_vs_depth_histo_->Write();
-        induced_charge_h_vs_depth_histo_->Write();
-        induced_charge_map_->Write();
-        induced_charge_e_map_->Write();
-        induced_charge_h_map_->Write();
-        if(!multiplication_.is<NoImpactIonization>()) {
-            gain_primary_histo_->Write();
-            gain_all_histo_->Write();
-            gain_e_histo_->Write();
-            gain_h_histo_->Write();
-            multiplication_level_histo_->Write();
-            multiplication_depth_histo_->Write();
-            gain_e_vs_x_->Write();
-            gain_e_vs_y_->Write();
-            gain_e_vs_z_->Write();
-            gain_h_vs_x_->Write();
-            gain_h_vs_y_->Write();
-            gain_h_vs_z_->Write();
-        }
     }
 }

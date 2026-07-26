@@ -241,10 +241,8 @@ void ProjectionPropagationModule::run(Event* event) {
             // Add point of deposition to the output plots if requested
             if(output_linegraphs_) {
                 output_plot_points.emplace_back(
-                    std::make_tuple(deposit.getGlobalTime(), charge_per_step, deposit.getType(), CarrierState::HALTED),
-                    std::vector<ROOT::Math::XYZPoint>());
-
-                output_plot_points.back().second.push_back(initial_position);
+                    deposit.getGlobalTime(), charge_per_step, deposit.getType(), CarrierState::HALTED);
+                output_plot_points.back().addPoint(initial_position, deposit.getGlobalTime());
             }
 
             // Get the electric field at the position of the deposited charge and the top of the sensor:
@@ -282,7 +280,8 @@ void ProjectionPropagationModule::run(Event* event) {
 
                     // Add position after diffusion to line graphs:
                     if(output_linegraphs_) {
-                        output_plot_points.back().second.push_back(local_position_diffusion);
+                        // FIXME time
+                        output_plot_points.back().addPoint(local_position_diffusion, deposit.getGlobalTime());
                     }
 
                     continue;
@@ -315,7 +314,7 @@ void ProjectionPropagationModule::run(Event* event) {
                     // Add position at sensor intercept:
                     if(output_linegraphs_) {
                         auto intercept = detector_->getModel()->getSensorIntercept(initial_position, position);
-                        output_plot_points.back().second.push_back(intercept);
+                        output_plot_points.back().addPoint(intercept, deposit.getGlobalTime() + diffusion_time);
                     }
 
                     continue;
@@ -323,7 +322,7 @@ void ProjectionPropagationModule::run(Event* event) {
 
                 // Add potential position after diffusion to line graphs:
                 if(output_linegraphs_) {
-                    output_plot_points.back().second.push_back(position);
+                    output_plot_points.back().addPoint(position, deposit.getGlobalTime() + diffusion_time);
                 }
 
                 LOG(TRACE) << "Charge diffused to position: " << Units::display(position, {"mm", "um"});
@@ -405,7 +404,7 @@ void ProjectionPropagationModule::run(Event* event) {
 
             // Finalize line graph by adding final position
             if(output_linegraphs_) {
-                output_plot_points.back().second.push_back(local_position);
+                output_plot_points.back().addPoint(local_position, global_time);
             }
 
             if(output_plots_) {
@@ -460,16 +459,6 @@ void ProjectionPropagationModule::run(Event* event) {
 void ProjectionPropagationModule::finalize() {
     if(output_plots_) {
         group_size_histo_->Get()->GetXaxis()->SetRange(1, group_size_histo_->Get()->GetNbinsX() + 1);
-
-        // Write output plots
-        drift_time_histo_->Write();
-        propagation_time_histo_->Write();
-        initial_position_histo_->Write();
-        recombine_histo_->Write();
-        group_size_histo_->Write();
-        if(diffuse_deposit_) {
-            diffusion_time_histo_->Write();
-        }
     }
     LOG(INFO) << deposits_exceeding_max_groups_ * 100.0 / total_deposits_ << "% of deposits have charge exceeding the "
               << max_charge_groups_ << " charge groups allowed, with a charge_per_step value of " << charge_per_step_ << ".";

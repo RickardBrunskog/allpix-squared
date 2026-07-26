@@ -75,7 +75,7 @@ namespace allpix {
         void run(Event*) override;
 
         /**
-         * @brief Cleanup \ref RunManager for each thread
+         * @brief Cleanup \ref MTRunManager for each thread
          */
         void finalizeThread() override;
 
@@ -130,9 +130,6 @@ namespace allpix {
         std::atomic_uint total_charges_{0};
 
         std::atomic_size_t number_of_sensors_{0};
-
-        // Mutex used for the construction of histograms
-        std::mutex histogram_mutex_;
     };
 
     class MagneticField : public G4MagneticField {

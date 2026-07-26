@@ -2701,13 +2701,10 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         if(output_linegraphs_) {
             output_plot_points.emplace_back(
-                std::make_tuple(
-                    charge.getGlobalTime(),
-                    charge.getCharge(),
-                    charge.getType(),
-                    CarrierState::MOTION
-                ),
-                std::vector<ROOT::Math::XYZPoint>()
+                charge.getGlobalTime(),
+                charge.getCharge(),
+                charge.getType(),
+                CarrierState::MOTION
             );
         }
     }
@@ -6612,7 +6609,7 @@ InteractivePropagationModule::propagate_together(Event* event,
 
             // TODO: Change output_plots_step implementation to not depend on floating point errors.
             if(output_linegraphs_ && std::fmod(time, output_plots_step_) < timestep_) {
-                output_plot_points.at(i).second.push_back(position);
+                output_plot_points.at(i).addPoint(position, time);
             }
 
             // Only propagate within a timestep range above the time threshold (time <= rk_time < time + timestep_)
@@ -7286,7 +7283,7 @@ InteractivePropagationModule::propagate_together(Event* event,
         }
 
         if(output_linegraphs_) {
-            std::get<3>(output_plot_points.at(i).first) = charge_states[i];
+            output_plot_points.at(i).updateState(charge_states[i]);
         }
 
         // Create PropagatedCharge object and add it to the list
@@ -7534,45 +7531,6 @@ void InteractivePropagationModule::finalize() {
     if(output_plots_) {
         group_size_histo_->Get()->GetXaxis()->SetRange(1, group_size_histo_->Get()->GetNbinsX() + 1);
 
-        potential_difference_->Write();
-        step_length_histo_->Write();
-        group_size_histo_->Write();
-        drift_time_histo_->Write();
-        recombine_histo_->Write();
-        recombination_time_histo_->Write();
-        trapped_histo_->Write();
-        induced_charge_histo_->Write();
-        induced_charge_e_histo_->Write();
-        induced_charge_h_histo_->Write();
-        if(!multiplication_.is<NoImpactIonization>()) {
-            induced_charge_primary_histo_->Write();
-            induced_charge_primary_e_histo_->Write();
-            induced_charge_primary_h_histo_->Write();
-            induced_charge_secondary_histo_->Write();
-            induced_charge_secondary_e_histo_->Write();
-            induced_charge_secondary_h_histo_->Write();
-        }
-        induced_charge_vs_depth_histo_->Write();
-        induced_charge_e_vs_depth_histo_->Write();
-        induced_charge_h_vs_depth_histo_->Write();
-        induced_charge_map_->Write();
-        induced_charge_e_map_->Write();
-        induced_charge_h_map_->Write();
-        if(!multiplication_.is<NoImpactIonization>()) {
-            gain_primary_histo_->Write();
-            gain_all_histo_->Write();
-            gain_e_histo_->Write();
-            gain_h_histo_->Write();
-            multiplication_level_histo_->Write();
-            multiplication_depth_histo_->Write();
-            gain_e_vs_x_->Write();
-            gain_e_vs_y_->Write();
-            gain_e_vs_z_->Write();
-            gain_h_vs_x_->Write();
-            gain_h_vs_y_->Write();
-            gain_h_vs_z_->Write();
-        }
-
         if (output_rms_){
             rms_total_graph_->Add(rms_e_subgraph_);
             rms_total_graph_->Add(rms_h_subgraph_);
@@ -7586,6 +7544,6 @@ void InteractivePropagationModule::finalize() {
             rms_e_graph_->Write();
         }
 
-        coulomb_mag_histo_->Write();
+
     }
 }
