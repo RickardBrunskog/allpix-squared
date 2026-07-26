@@ -22,12 +22,12 @@
 #include <iomanip>
 #include <Eigen/Core>
 
+#include "core/module/exceptions.h"
 #include "core/utils/distributions.h"
 #include "core/utils/log.h"
+#include "objects/PropagationSummary.hpp"
 #include "objects/exceptions.h"
 #include "tools/runge_kutta.h"
-#include "objects/PropagationSummary.hpp"
-
 
 using namespace allpix;
 
@@ -168,12 +168,37 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     temperature_ = config_.get<double>("temperature");
     timestep_ = config_.get<double>("timestep");
     integration_time_ = config_.get<double>("integration_time");
+
+    if(!std::isfinite(timestep_) || timestep_ <= 0.0) {
+        throw InvalidValueError(config, "timestep", "value must be finite and greater than zero");
+    }
+
+    if(!std::isfinite(integration_time_) || integration_time_ <= 0.0) {
+        throw InvalidValueError(config, "integration_time", "value must be finite and greater than zero");
+    }
+
     distance_ = config_.get<unsigned int>("distance");
     charge_per_step_ = config_.get<unsigned int>("charge_per_step");
+
+    if(charge_per_step_ == 0U) {
+        throw InvalidValueError(config, "charge_per_step", "value must be greater than zero");
+    }
     max_charge_groups_ = config_.get<unsigned int>("max_charge_groups");
     boltzmann_kT_ = Units::get(8.6173333e-5, "eV/K") * temperature_;
     coulomb_K_ =  1.43996454e-12; //Units::get(1.43996454e-12, "MV mm/e");
     surface_reflectivity_ = config_.get<double>("surface_reflectivity");
+
+    if(!std::isfinite(surface_reflectivity_) || surface_reflectivity_ < 0.0 || surface_reflectivity_ > 1.0) {
+        throw InvalidValueError(config, "surface_reflectivity", "value must be finite and within [0, 1]");
+    }
+
+    if(config_.get<bool>("enable_coulomb_initial_step_refinement") &&
+       config_.get<unsigned int>("coulomb_initial_step_refinement_factor") == 0U) {
+        throw InvalidValueError(config,
+                                "coulomb_initial_step_refinement_factor",
+                                "value must be greater than zero when initial-step "
+                                "refinement is enabled");
+    }
 
     max_multiplication_level_ = config.get<unsigned int>("max_multiplication_level");
 
@@ -187,14 +212,31 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
 
     relative_permittivity_ = config.get<double>("relative_permittivity"); // the permativity of materials isn't in allpix, so rely on user to pass this in
 
+    if(enable_coulomb_repulsion_ && (!std::isfinite(relative_permittivity_) || relative_permittivity_ <= 0.0)) {
+        throw InvalidValueError(config,
+                                "relative_permittivity",
+                                "value must be finite and greater than zero when Coulomb "
+                                "repulsion is enabled");
+    }
+
     if (enable_coulomb_repulsion_ && relative_permittivity_ == 1) {
         LOG(WARNING) << "Coulomb repulsion is enabled but relative permittivity is set to one. Check that the parameter relative_permittivity isn't misspelled or ommited.";
     }
 
     const auto coulomb_distance_limit = config_.get<double>("coulomb_distance_limit");
-    
+
+    if(enable_coulomb_repulsion_ && (!std::isfinite(coulomb_distance_limit) || coulomb_distance_limit < 0.0)) {
+        throw InvalidValueError(config,
+                                "coulomb_distance_limit",
+                                "value must be finite and non-negative when Coulomb "
+                                "repulsion is enabled");
+    }
+
     coulomb_distance_limit_squared_ = coulomb_distance_limit * coulomb_distance_limit;
-    // coulomb_field_limit_ = config.get<double>("coulomb_field_limit"); // Convert from V/cm to MV/mm (internal field units)
+
+    if(enable_coulomb_repulsion_ && !std::isfinite(coulomb_distance_limit_squared_)) {
+        throw InvalidValueError(config, "coulomb_distance_limit", "value is too large to square safely");
+    }
 
     // Store the coulomb_field_limit_ 
 
@@ -244,6 +286,18 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     output_plots_step_ = config_.get<double>("output_plots_step");
     // Rickard 2026-04-05: Get step size for outputting propagation summary objects
     output_propagation_summary_step_ = config_.get<double>("output_propagation_summary_step");
+
+    if(!std::isfinite(output_plots_step_) || output_plots_step_ <= 0.0) {
+        throw InvalidValueError(config, "output_plots_step", "value must be finite and greater than zero");
+    }
+
+    if(output_propagation_summary_ &&
+       (!std::isfinite(output_propagation_summary_step_) || output_propagation_summary_step_ <= 0.0)) {
+        throw InvalidValueError(config,
+                                "output_propagation_summary_step",
+                                "value must be finite and greater than zero when propagation "
+                                "summary output is enabled");
+    }
 
     // Enable multithreading of this module if multithreading is enabled and no per-event output plots are requested:
     // FIXME: Review if this is really the case or we can still use multithreading
@@ -997,16 +1051,6 @@ InteractivePropagationModule::propagate_together(Event* event,
             config_.get<unsigned int>(
                 "coulomb_initial_step_refinement_factor"
             );
-
-    if(
-        enable_coulomb_initial_step_refinement
-        && coulomb_initial_step_refinement_factor == 0U
-    ) {
-        throw ModuleError(
-            "coulomb_initial_step_refinement_factor must be "
-            "greater than zero"
-        );
-    }
 
     if(
         enable_coulomb_initial_step_refinement
