@@ -1316,11 +1316,9 @@ InteractivePropagationModule::propagate_together(Event* event,
         "coulomb_refinement_charge_weighted_rms_tolerance"
     );
 
-    if(refinement_charge_weighted_rms_tolerance < 0.0) {
-        throw ModuleError(
-            "coulomb_refinement_charge_weighted_rms_tolerance "
-            "cannot be negative"
-        );
+    if(!std::isfinite(refinement_charge_weighted_rms_tolerance) || refinement_charge_weighted_rms_tolerance < 0.0) {
+        throw ModuleError("coulomb_refinement_charge_weighted_rms_tolerance "
+                          "must be finite and non-negative");
     }
 
     const double refinement_max_endpoint_tolerance =
@@ -1328,11 +1326,9 @@ InteractivePropagationModule::propagate_together(Event* event,
             "coulomb_refinement_max_endpoint_tolerance"
         );
 
-    if(refinement_max_endpoint_tolerance < 0.0) {
-        throw ModuleError(
-            "coulomb_refinement_max_endpoint_tolerance "
-            "cannot be negative"
-        );
+    if(!std::isfinite(refinement_max_endpoint_tolerance) || refinement_max_endpoint_tolerance < 0.0) {
+        throw ModuleError("coulomb_refinement_max_endpoint_tolerance "
+                          "must be finite and non-negative");
     }
 
     // SplitMix64 is used only to construct stable pair-dependent directions.
