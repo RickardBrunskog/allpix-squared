@@ -71,7 +71,6 @@
 #include "physics/MaterialProperties.hpp"
 #include "tools/ROOT.h"
 #include "tools/geant4/MTRunManager.hpp"
-#include "tools/geant4/RunManager.hpp"
 
 #define G4_NUM_SEEDS 10
 
@@ -144,19 +143,14 @@ DepositionGeant4Module::DepositionGeant4Module(Configuration& config, Messenger*
  * Module depends on \ref GeometryBuilderGeant4Module loaded first, because it owns the pointer to the Geant4 run manager.
  */
 void DepositionGeant4Module::initialize() {
-    MTRunManager* run_manager_mt = nullptr;
 
     number_of_particles_ = config_.get<unsigned int>("number_of_particles", 1);
     output_plots_ = config_.get<bool>("output_plots");
 
     // Load the G4 run manager (which is owned by the geometry builder)
-    if(multithreadingEnabled()) {
-        run_manager_g4_ = G4MTRunManager::GetMasterRunManager();
-        run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
-        G4Threading::SetMultithreadedApplication(true);
-    } else {
-        run_manager_g4_ = G4RunManager::GetRunManager();
-    }
+    run_manager_g4_ = G4MTRunManager::GetMasterRunManager();
+    auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
+    G4Threading::SetMultithreadedApplication(true);
 
     if(run_manager_g4_ == nullptr) {
         throw ModuleError("Cannot deposit charges using Geant4 without a Geant4 geometry builder");
@@ -195,7 +189,7 @@ void DepositionGeant4Module::initialize() {
     auto physics_list_up = allpix::transform(config_.get<std::string>("physics_list"), ::toupper);
     auto physics_list = config_.get<std::string>("physics_list");
     G4PhysListFactory physListFactory;
-    G4VModularPhysicsList* physicsList{nullptr};
+    G4VUserPhysicsList* physicsList{nullptr};
 
     try {
         // Check if present in AdditionalPhysicsLists
@@ -203,17 +197,38 @@ void DepositionGeant4Module::initialize() {
 
         // Otherwise, attempt to get the physics list from the factory
         if(physicsList == nullptr) {
+            LOG(DEBUG) << "Looking out for physics list in the physics list factory.";
+            G4VModularPhysicsList* modularPhysicsList{nullptr};
+
             // Geant4 throws an exception if the list is not found
-            physicsList = physListFactory.GetReferencePhysList(physics_list);
-        }
+            modularPhysicsList = physListFactory.GetReferencePhysList(physics_list);
 
-        // Upper-case version of config
-        if(physicsList == nullptr) {
-            physicsList = physListFactory.GetReferencePhysList(physics_list_up);
-        }
+            // Upper-case version of config
+            if(modularPhysicsList == nullptr) {
+                modularPhysicsList = physListFactory.GetReferencePhysList(physics_list_up);
+            }
 
-        if(physicsList == nullptr) {
-            throw ModuleError("");
+            if(modularPhysicsList == nullptr) {
+                throw ModuleError("");
+            }
+
+            // NOLINTBEGIN(cppcoreguidelines-owning-memory)
+            // Register a step limiter (uses the user limits defined earlier)
+            LOG(DEBUG) << "Registering Geant4 step limiter physics list";
+            modularPhysicsList->RegisterPhysics(new G4StepLimiterPhysics());
+
+            // Register radioactive decay physics lists unless the list already has it registered:
+            if(physics_list_up.find("HP") == std::string::npos && physics_list.find("Shielding") == std::string::npos) {
+                LOG(DEBUG) << "Registering Geant4 radioactive decay physics list";
+                modularPhysicsList->RegisterPhysics(new G4RadioactiveDecayPhysics());
+            }
+            // NOLINTEND(cppcoreguidelines-owning-memory)
+
+            physicsList = dynamic_cast<G4VUserPhysicsList*>(modularPhysicsList);
+
+            if(physicsList == nullptr) {
+                throw ModuleError("");
+            }
         }
     } catch(ModuleError&) {
         std::string message = "specified physics list does not exists";
@@ -239,19 +254,17 @@ void DepositionGeant4Module::initialize() {
 
     LOG(INFO) << "Using G4 physics list \"" << physics_list << "\"";
 
-    // Register a step limiter (uses the user limits defined earlier)
-    LOG(DEBUG) << "Registering Geant4 step limiter physics list";
-    physicsList->RegisterPhysics(new G4StepLimiterPhysics());
-
-    // Register radioactive decay physics lists unless the list already has it registered:
-    if(physics_list_up.find("HP") == std::string::npos && physics_list.find("Shielding") == std::string::npos) {
-        LOG(DEBUG) << "Registering Geant4 radioactive decay physics list";
-        physicsList->RegisterPhysics(new G4RadioactiveDecayPhysics());
-    }
-
     // If the specified physics list is one of the microelec variations, apply a target region to the volumes with silicon
     // materials
     if(physics_list == "MICROELEC" || physics_list == "MICROELEC-SIONLY") {
+        auto particle_type = allpix::transform(config_.get<std::string>("particle_type", ""), ::tolower);
+        if(!(particle_type == "e-" || particle_type == "proton")) {
+            throw InvalidCombinationError(
+                config_,
+                {"physics_list", "particle_type"},
+                "The physics list \"MICROELEC-SIONLY\" supports only electrons and protons as particle type.");
+        }
+
         // Create target region
         auto* region = new G4Region("Target");
 
@@ -374,18 +387,52 @@ void DepositionGeant4Module::initialize() {
     initialize_g4_action();
 
     // Construct the sensitive detectors and fields.
-    if(run_manager_mt == nullptr) {
-        // Create the info track manager for the main thread before creating the Sensitive detectors.
-        track_info_manager_ = std::make_unique<TrackInfoManager>(config_.get<bool>("record_all_tracks"));
-        construct_sensitive_detectors_and_fields();
-    } else {
-        // In MT-mode we register a builder that will be called for each thread to construct the SD when needed.
-        auto detector_construction = std::make_unique<SDAndFieldConstruction>(this);
-        run_manager_mt->SetSDAndFieldConstruction(std::move(detector_construction));
-    }
+    // Register a builder that will be called for each thread to construct the SD when needed.
+    auto detector_construction = std::make_unique<SDAndFieldConstruction>(this);
+    run_manager_mt->SetSDAndFieldConstruction(std::move(detector_construction));
 
     // Flush the Geant4 stream buffer because some elements in the initialization never do:
     G4cout << G4endl;
+
+    // If requested, prepare output plots
+    if(output_plots_) {
+        for(auto& detector : geo_manager_->getDetectors()) {
+            LOG(TRACE) << "Creating output plots for detector " << detector->getName();
+
+            // Plot axis are in kilo electrons - convert from framework units!
+            int const maximum_charge = static_cast<int>(Units::convert(config_.get<int>("output_plots_scale"), "ke"));
+            double const maximum_energy =
+                std::ceil(static_cast<double>(maximum_charge / 2. * Units::convert(min_charge_creation_energy, "eV")) / 10) *
+                10;
+            int const nbins = 5 * maximum_charge;
+
+            // Get detector model size
+            auto sensor_size = detector->getModel()->getSensorSize();
+            auto pixel_size = detector->getModel()->getPixelSize();
+
+            // Create histograms if needed
+            std::string plot_name = "deposited_charge_" + detector->getName();
+
+            charge_per_event_[detector->getName()] = CreateHistogram<TH1D>(
+                plot_name.c_str(), "deposited charge per event;deposited charge [ke];events", nbins, 0, maximum_charge);
+
+            plot_name = "deposited_energy_" + detector->getName();
+
+            energy_per_event_[detector->getName()] = CreateHistogram<TH1D>(
+                plot_name.c_str(), "deposited energy per event;deposited energy [keV];events", nbins, 0, maximum_energy);
+
+            plot_name = "incident_track_position_" + detector->getName();
+
+            incident_track_position_[detector->getName()] = CreateHistogram<TH2D>(plot_name.c_str(),
+                                                                                  "incident track position;X [mm];Y [mm];Z",
+                                                                                  500,
+                                                                                  -pixel_size.X() / 2,
+                                                                                  sensor_size.X() - (pixel_size.X() / 2),
+                                                                                  500,
+                                                                                  -pixel_size.Y() / 2,
+                                                                                  sensor_size.Y() - (pixel_size.Y() / 2));
+        }
+    }
 }
 
 void DepositionGeant4Module::initialize_g4_action() {
@@ -399,17 +446,15 @@ void DepositionGeant4Module::initializeThread() {
     LOG(DEBUG) << "Initializing run manager";
 
     // Initialize the thread local G4RunManager in case of MT
-    if(multithreadingEnabled()) {
-        auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
+    auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
 
-        // In MT-mode the sensitive detectors will be created with the calls to BeamOn. So we construct the
-        // track manager for each calling thread here.
-        if(track_info_manager_ == nullptr) {
-            track_info_manager_ = std::make_unique<TrackInfoManager>(config_.get<bool>("record_all_tracks"));
-        }
-
-        run_manager_mt->InitializeForThread();
+    // In MT-mode the sensitive detectors will be created with the calls to BeamOn. So we construct the
+    // track manager for each calling thread here.
+    if(track_info_manager_ == nullptr) {
+        track_info_manager_ = std::make_unique<TrackInfoManager>(config_.get<bool>("record_all_tracks"));
     }
+
+    run_manager_mt->InitializeForThread();
 
     // Set selected tracking verbosity, defaulting to zero. Higher levels can be useful for tracing individual Geant4 events
     G4RunManagerKernel::GetRunManagerKernel()->GetTrackingManager()->SetVerboseLevel(
@@ -433,13 +478,8 @@ void DepositionGeant4Module::run(Event* event) {
     LOG(DEBUG) << "Seeding Geant4 event with seeds " << seed1 << " " << seed2;
 
     try {
-        if(multithreadingEnabled()) {
-            auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
-            run_manager_mt->Run(static_cast<int>(number_of_particles_), seed1, seed2);
-        } else {
-            auto* run_manager = dynamic_cast<RunManager*>(run_manager_g4_);
-            run_manager->Run(static_cast<int>(number_of_particles_), seed1, seed2);
-        }
+        auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
+        run_manager_mt->Run(static_cast<int>(number_of_particles_), seed1, seed2);
 
         uint64_t last_event_num = last_event_num_.load();
         last_event_num_.compare_exchange_strong(last_event_num, event->number);
@@ -481,20 +521,6 @@ void DepositionGeant4Module::run(Event* event) {
 }
 
 void DepositionGeant4Module::finalize() {
-    if(output_plots_) {
-        // Write histograms
-        LOG(TRACE) << "Writing output plots to file";
-        for(auto& histogram : charge_per_event_) {
-            histogram.second->Write();
-        }
-        for(auto& histogram : energy_per_event_) {
-            histogram.second->Write();
-        }
-        for(auto& histogram : incident_track_position_) {
-            histogram.second->Write();
-        }
-    }
-
     // Print summary or warns if module did not output any charges
     if(number_of_sensors_ > 0 && total_charges_ > 0 && last_event_num_ > 0) {
         size_t const average_charge = total_charges_ / number_of_sensors_ / last_event_num_;
@@ -509,10 +535,8 @@ void DepositionGeant4Module::finalizeThread() {
     // Record the number of sensors and the total charges
     record_module_statistics();
 
-    if(multithreadingEnabled()) {
-        auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
-        run_manager_mt->TerminateForThread();
-    }
+    auto* run_manager_mt = dynamic_cast<MTRunManager*>(run_manager_g4_);
+    run_manager_mt->TerminateForThread();
 }
 
 void DepositionGeant4Module::construct_sensitive_detectors_and_fields() {
@@ -567,61 +591,6 @@ void DepositionGeant4Module::construct_sensitive_detectors_and_fields() {
         }
 
         sensors_.push_back(sensitive_detector_action);
-
-        // If requested, prepare output plots
-        if(output_plots_) {
-            LOG(TRACE) << "Creating output plots for detector " << sensitive_detector_action->getName();
-
-            // Plot axis are in kilo electrons - convert from framework units!
-            int const maximum_charge = static_cast<int>(Units::convert(config_.get<int>("output_plots_scale"), "ke"));
-            double const maximum_energy =
-                (static_cast<int>(maximum_charge / 2. * Units::convert(charge_creation_energy, "eV")) / 10) * 10 + 10;
-            int const nbins = 5 * maximum_charge;
-
-            // Get detector model size
-            auto sensor_size = detector->getModel()->getSensorSize();
-            auto pixel_size = detector->getModel()->getPixelSize();
-
-            // Create histograms if needed
-            {
-                std::lock_guard<std::mutex> const lock(histogram_mutex_);
-                std::string plot_name = "deposited_charge_" + sensitive_detector_action->getName();
-
-                if(charge_per_event_.find(sensitive_detector_action->getName()) == charge_per_event_.end()) {
-                    charge_per_event_[sensitive_detector_action->getName()] =
-                        CreateHistogram<TH1D>(plot_name.c_str(),
-                                              "deposited charge per event;deposited charge [ke];events",
-                                              nbins,
-                                              0,
-                                              maximum_charge);
-                }
-
-                plot_name = "deposited_energy_" + sensitive_detector_action->getName();
-
-                if(energy_per_event_.find(sensitive_detector_action->getName()) == energy_per_event_.end()) {
-                    energy_per_event_[sensitive_detector_action->getName()] =
-                        CreateHistogram<TH1D>(plot_name.c_str(),
-                                              "deposited energy per event;deposited energy [keV];events",
-                                              nbins,
-                                              0,
-                                              maximum_energy);
-                }
-
-                plot_name = "incident_track_position_" + sensitive_detector_action->getName();
-
-                if(incident_track_position_.find(sensitive_detector_action->getName()) == incident_track_position_.end()) {
-                    incident_track_position_[sensitive_detector_action->getName()] =
-                        CreateHistogram<TH2D>(plot_name.c_str(),
-                                              "incident track position;X [mm];Y [mm];Z",
-                                              5000,
-                                              -pixel_size.X() / 2,
-                                              sensor_size.X() - pixel_size.X() / 2,
-                                              5000,
-                                              -pixel_size.Y() / 2,
-                                              sensor_size.Y() - pixel_size.Y() / 2);
-                }
-            }
-        }
     }
 }
 

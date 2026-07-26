@@ -21,6 +21,9 @@
 
 #include <G4EnvironmentUtils.hh>
 #include <G4GlobalConfig.hh>
+#include <G4LogicalVolumeStore.hh>
+#include <G4PhysicalVolumeStore.hh>
+#include <G4SolidStore.hh>
 #include <G4StateManager.hh>
 #include <G4UImanager.hh>
 #include <G4Version.hh>
@@ -35,7 +38,6 @@
 #include "tools/geant4/G4ExceptionHandler.hpp"
 #include "tools/geant4/G4LoggingDestination.hpp"
 #include "tools/geant4/MTRunManager.hpp"
-#include "tools/geant4/RunManager.hpp"
 
 using namespace allpix;
 using namespace ROOT;
@@ -128,17 +130,9 @@ void GeometryBuilderGeant4Module::initialize() {
     check_dataset_g4("G4NEUTRONXSDATA");
 #endif
 
-    // Create the G4 run manager. If multithreading was requested we use the custom run manager
-    // that support calling BeamOn operations in parallel. Otherwise we use default manager.
-    if(multithreadingEnabled()) {
-        LOG(DEBUG) << "Making a multi-thread RunManager";
-        run_manager_g4_ = std::make_unique<MTRunManager>();
-    } else {
-        LOG(DEBUG) << "Making a single-thread RunManager";
-        run_manager_g4_ = std::make_unique<RunManager>();
-        LOG(INFO) << "Using Geant4 modules without multithreading might reduce performance when using complex geometries, "
-                     "please check the documentation for details";
-    }
+    // Create the G4 run manager, we use the custom run manager that support calling BeamOn operations in parallel.
+    LOG(DEBUG) << "Preparing Geant4 RunManager";
+    run_manager_g4_ = std::make_unique<MTRunManager>();
 
     // Set the geometry construction to use
     run_manager_g4_->SetUserInitialization(geometry_construction_);
@@ -146,4 +140,12 @@ void GeometryBuilderGeant4Module::initialize() {
     // Run the geometry construct function in GeometryConstructionG4
     LOG(TRACE) << "Building Geant4 geometry";
     run_manager_g4_->InitializeGeometry();
+}
+
+GeometryBuilderGeant4Module::~GeometryBuilderGeant4Module() {
+    run_manager_g4_.reset();
+
+    G4PhysicalVolumeStore::GetInstance()->clear();
+    G4LogicalVolumeStore::GetInstance()->clear();
+    G4SolidStore::GetInstance()->clear();
 }

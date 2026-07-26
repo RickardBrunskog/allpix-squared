@@ -8,7 +8,7 @@
  * Intergovernmental Organization or submit itself to any jurisdiction.
  * SPDX-License-Identifier: MIT
  *
- * Used extensively for parsing the configuration in the \ref allpix::ConfigReader.
+ * Used extensively for parsing the configuration in the \ref allpix::FileParser.
  */
 
 /**
@@ -138,6 +138,6 @@ namespace allpix {
 } // namespace allpix
 
 // Include template definitions
-#include "text.tpp"
+#include "text.tpp" // IWYU pragma: keep
 
 #endif /* ALLPIX_TEXT_H */
