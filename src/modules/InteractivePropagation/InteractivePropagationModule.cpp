@@ -1097,12 +1097,12 @@ InteractivePropagationModule::propagate_together(Event* event,
     // Survival probability of this charge carrier package, evaluated at every step
     allpix::uniform_real_distribution<double> uniform_distribution(0, 1);
 
-    // Create vectors that store charge information in a place that can be modified each time step 
-        // They need to be here since they are used in dynamic field function, but they are set to initial states below
-        // The order of objects within them must stay consistent
-    std::vector<ROOT::Math::XYZPoint> charge_locations; // Current position of each charge 
-    std::vector<ROOT::Math::XYZPoint> previous_charge_locations; // Positions of each charge at the previous time step (only updated once at the end of each timestep)
-    std::vector<double> charge_times; // Most recent time for all of the charges (by the end of propagation they should all be aligned)
+    // Create vectors that store charge information in a place that can be modified each time step
+    // They need to be here since they are used in dynamic field function, but they are set to initial states below
+    // The order of objects within them must stay consistent
+    std::vector<ROOT::Math::XYZPoint> charge_locations; // Current position of each charge
+    std::vector<ROOT::Math::XYZPoint> previous_charge_locations; // Positions of each charge at the previous time step (only
+                                                                 // updated once at the end of each timestep)
     std::vector<allpix::CarrierState> charge_states; // The state of propagation of each charge group (whether it's propagated, trapped, or halted)
     std::vector<allpix::CarrierState> previous_charge_states; // States frozen at the beginning of the current outer timestep. These are used for all Coulomb evaluations during that timestep.
     std::vector<std::uint8_t> all_sources_enabled;// Explicit source-activation mask. The existing independent solver enables every group here and continues to use deposition-time gating. The later coupled solver will provide a fixed mask for each substep.
@@ -2723,10 +2723,6 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         previous_charge_locations.push_back(
             charge.getLocalPosition()
-        );
-
-        charge_times.push_back(
-            charge.getLocalTime()
         );
 
         charge_states.push_back(
@@ -6971,9 +6967,6 @@ InteractivePropagationModule::propagate_together(Event* event,
                     << " ns";
             }
 
-            charge_times[i] =
-                rk_time_after;
-            
             // Get the new position due to the electric field
             position = convertVectorToPoint(runge_kutta.getValue());
 
