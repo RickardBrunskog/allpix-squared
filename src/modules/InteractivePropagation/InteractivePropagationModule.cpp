@@ -286,6 +286,9 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
     output_linegraphs_recombined_ = config_.get<bool>("output_linegraphs_recombined");
     output_linegraphs_trapped_ = config_.get<bool>("output_linegraphs_trapped");
     output_rms_ = config_.get<bool>("output_rms");
+    if(output_rms_ && !output_plots_) {
+        throw InvalidValueError(config, "output_plots", "value must be true when output_rms is enabled");
+    }
     output_plots_step_ = config_.get<double>("output_plots_step");
     // Rickard 2026-04-05: Get step size for outputting propagation summary objects
     output_propagation_summary_step_ = config_.get<double>("output_propagation_summary_step");
