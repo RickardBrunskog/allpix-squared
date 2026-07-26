@@ -688,9 +688,6 @@ void InteractivePropagationModule::run(Event* event) {
     // Create vector of propagating charges to store each charge groups position, location, time, type, etc. at the start of propagation
     std::vector<PropagatedCharge> propagating_charges;
 
-    //Create vector to temporarily store the applicable deposited charges
-    std::vector<DepositedCharge> deposited_charges;
-
     //Storage of total charge
     unsigned int total_deposited_charge = 0;
 
@@ -3163,10 +3160,6 @@ InteractivePropagationModule::propagate_together(Event* event,
 
         return diffused_positions;
     };
-
-    if(propagating_charges.empty()) {
-        return std::make_tuple(0U, 0U, 0U);
-    }
 
     // Set up variables that are changed each loop
     Eigen::Vector3d efield{};
