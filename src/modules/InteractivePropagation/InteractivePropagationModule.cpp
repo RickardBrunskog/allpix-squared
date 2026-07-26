@@ -166,6 +166,9 @@ InteractivePropagationModule::InteractivePropagationModule(Configuration& config
 
     // Copy some variables from configuration to avoid lookups:
     temperature_ = config_.get<double>("temperature");
+    if(!std::isfinite(temperature_) || temperature_ <= 0.0) {
+        throw InvalidValueError(config, "temperature", "value must be finite and greater than zero");
+    }
     timestep_ = config_.get<double>("timestep");
     integration_time_ = config_.get<double>("integration_time");
 
