@@ -710,7 +710,6 @@ void InteractivePropagationModule::run(Event* event) {
             continue;
         }
 
-        total_deposits_++;
         total_deposited_charge += deposit.getCharge();
 
     }
@@ -7569,8 +7568,7 @@ InteractivePropagationModule::propagate_together(Event* event,
 
 // Copied from TransientPropagation.cpp with addition of rms plots
 void InteractivePropagationModule::finalize() {
-    LOG(INFO) << deposits_exceeding_max_groups_ * 100.0 / total_deposits_ << "% of deposits have charge exceeding the "
-              << max_charge_groups_ << " charge groups allowed, with a charge_per_step value of " << charge_per_step_ << "."; //TODO: Change to make sense with the new interpretation of max_charge_groups
+
     if(output_plots_) {
         group_size_histo_->Get()->GetXaxis()->SetRange(1, group_size_histo_->Get()->GetNbinsX() + 1);
 
