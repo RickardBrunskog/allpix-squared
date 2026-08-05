@@ -6,7 +6,7 @@ description: "Propagation of deposited charges via Shockley-Ramo induction"
 module_status: "Functional"
 module_maintainers: ["Simon Spannagel (<simon.spannagel@cern.ch>)"]
 module_inputs: ["DepositedCharge"]
-module_outputs: ["PropagatedCharge"]
+module_outputs: ["PropagatedCharge", "PropagationSummary"]
 ---
 
 ## Description
@@ -67,6 +67,28 @@ It should be noted that generating the animations is time-consuming and should b
 * `multiplication_threshold`: Threshold field above which charge multiplication is calculated. Defaults to `100kV/cm`.
 * `max_multiplication_level`: Maximum level depth of the generated impact ionization charge multiplication shower after which the generation of further multiplication charge carrier levels is prohibited. This number represents the maximum number of daughter charge carrier groups that can be produced by one initial charge carrier group. This does not concern the size of the charge group itself but solely the level of generation. If a group generates a secondary group through impact ionization, the depth is `1`. If this secondary group again creates charge carriers when propagating, the level is `2` and so on. The default value is `5`.
 * `surface_reflectivity`: Reflectivity of the sensor surface for charge carriers. Used to calculate a probability that charge carriers are not absorbed at the interface but reflected back into the sensor volume. Defaults to `0.0`, i.e. no reflectivity, and a value of `1.0` corresponds to total reflection.
+* `output_propagation_summary`: Enables the output of time-resolved `PropagationSummary` objects. Defaults to `false`.
+* `output_propagation_summary_step`: Sampling interval for `PropagationSummary` objects. Defaults to `timestep` and has to be finite and larger than zero when summary output is enabled.
+
+## Propagation-summary output
+
+When `output_propagation_summary` is enabled, the module dispatches one `PropagationSummaryMessage` per detector and event. Its samples lie on a local-time grid anchored at zero, use the interval set by `output_propagation_summary_step`, and remain below `integration_time`. A `PropagationSummary` object is created only for a time bin to which at least one carrier group contributes.
+
+Each sample combines all eligible carrier groups in the event. Electrons and holes are summarized separately, and all means and RMS quantities are weighted by the number of charge carriers represented by each group. Deposits contribute only from their deposition time onward. Carrier groups that have reached a sensor surface remain at their final position in later samples, whereas recombined and trapped groups are excluded after the corresponding process occurs. Charge generated through impact ionization is included.
+
+Each ROOT-serializable `PropagationSummary` object provides:
+
+| Quantity | Electron getters | Hole getters |
+|---|---|---|
+| Carrier data present | `hasElectrons()` | `hasHoles()` |
+| Charge-weighted mean local position | `getMeanXE()`, `getMeanYE()`, `getMeanZE()` | `getMeanXH()`, `getMeanYH()`, `getMeanZH()` |
+| Charge-weighted RMS spread in x, y, and z | `getRMSXE()`, `getRMSYE()`, `getRMSZE()` | `getRMSXH()`, `getRMSYH()`, `getRMSZH()` |
+| Total three-dimensional RMS spread | `getRMSEE()` | `getRMSEH()` |
+| Minimum and maximum local x | `getMinXE()`, `getMaxXE()` | `getMinXH()`, `getMaxXH()` |
+| Minimum and maximum local y | `getMinYE()`, `getMaxYE()` | `getMinYH()`, `getMaxYH()` |
+| Minimum and maximum local z | `getMinZE()`, `getMaxZE()` | `getMinZH()`, `getMaxZH()` |
+
+The sample time is available through `getLocalTime()`. If no eligible group of a given carrier type is present, its availability flag is false and all of its numerical fields are stored as `NaN`. The objects can be persisted with the standard Allpix Squared ROOT object writers. The complete C++ interface is defined in [`PropagationSummary.hpp`](../../objects/PropagationSummary.hpp).
 
 ## Plotting parameters
 
@@ -96,6 +118,8 @@ temperature = 293K
 charge_per_step = 10
 output_plots = true
 timestep = 0.02ns
+output_propagation_summary = true
+output_propagation_summary_step = 0.1ns
 ```
 
 [@shockley]: https://doi.org/10.1063/1.1710367

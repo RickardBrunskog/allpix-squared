@@ -5,7 +5,7 @@ title: "DepositionGeant4"
 description: "Energy deposition with Geant4"
 module_status: "Functional"
 module_maintainers: ["Tobias Bisanz (<tobias.bisanz@phys.uni-goettingen.de>)", "Thomas Billoud (<thomas.billoud@cern.ch>)"]
-module_outputs: ["DepositedCharge", "MCParticle", "MCTrack"]
+module_outputs: ["DepositedCharge", "MCParticle", "MCTrack", "RayleighScatter"]
 ---
 
 ## Description
@@ -70,6 +70,23 @@ The module supports the propagation of charged particles in a magnetic field if 
 
 With the `output_plots` parameter activated, the module produces histograms of the total deposited charge per event for every sensor in units of kilo-electrons.
 The scale of the plot axis can be adjusted using the `output_plots_scale` parameter and defaults to a maximum of 100ke.
+
+### Rayleigh-scattering truth output
+
+The module records every photon step whose Geant4 process name is `Rayl` and creates one `RayleighScatter` truth object for each such interaction. This output is generated automatically and does not require a configuration parameter. If at least one Rayleigh interaction occurs, the objects are dispatched together in a `RayleighScatterMessage` at the end of the event; no message is dispatched for events without Rayleigh scattering.
+
+The interactions are recorded throughout the Geant4 world and are not associated with a particular detector. Each ROOT-serializable object contains:
+
+| Quantity | Getter | Coordinate system or unit |
+|---|---|---|
+| Scatter position | `getPosition()` | Global coordinates, mm |
+| Incoming photon momentum | `getIncomingMomentum()` | Global Cartesian components, MeV |
+| Outgoing photon momentum | `getOutgoingMomentum()` | Global Cartesian components, MeV |
+| Scatter time | `getGlobalTime()` | Global event time, ns |
+| Photon track identifier | `getTrackID()` | Geant4 track ID |
+| Parent track identifier | `getParentID()` | Geant4 parent track ID |
+
+The objects can be persisted with the standard Allpix Squared ROOT object writers. Their complete C++ interface is defined in [`RayleighScatter.hpp`](../../objects/RayleighScatter.hpp).
 
 ## Dependencies
 
